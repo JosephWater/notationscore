@@ -1,0 +1,9 @@
+/build/
+/artifacts/
+/references/
+/CMakeUserPresets.json
+/.cache/
+*.user
+__pycache__/
+*.py[cod]
+*.log

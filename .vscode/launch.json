@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Qt 离屏断点验证 (Linux)", "type": "cppdbg", "request": "launch",
+      "program": "${workspaceFolder}/build/linux-debug/jianpu_lab", "args": ["--smoke"],
+      "cwd": "${workspaceFolder}", "MIMode": "gdb", "miDebuggerPath": "/usr/bin/gdb",
+      "environment": [{ "name": "QT_QPA_PLATFORM", "value": "offscreen" }],
+      "setupCommands": [{ "text": "set debuginfod enabled off" }],
+      "externalConsole": false, "preLaunchTask": "Build Debug (Linux)"
+    },
+    {
+      "name": "Qt 图形桌面 (Linux)", "type": "cppdbg", "request": "launch",
+      "program": "${workspaceFolder}/build/linux-debug/jianpu_lab", "args": [],
+      "cwd": "${workspaceFolder}", "MIMode": "gdb", "miDebuggerPath": "/usr/bin/gdb",
+      "setupCommands": [{ "text": "set debuginfod enabled off" }],
+      "externalConsole": false, "preLaunchTask": "Build Debug (Linux)"
+    },
+    {
+      "name": "Qt Windows 原生", "type": "cppvsdbg", "request": "launch",
+      "program": "${workspaceFolder}/build/windows-debug/jianpu_lab.exe", "args": [],
+      "cwd": "${workspaceFolder}", "environment": [{ "name": "PATH", "value": "${env:QT_ROOT}/bin;${env:PATH}" }],
+      "console": "integratedTerminal", "preLaunchTask": "Build Debug (Windows)"
+    }
+  ]
+}
