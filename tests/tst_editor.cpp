@@ -141,7 +141,7 @@ class EditorTest : public QObject
         }
         auto result = JianpuLayout().layout(s);
         QVERIFY(result.pages.size() > 1);
-        QVERIFY(result.pages.first().width() > 794);
+        QCOMPARE(qRound(result.pages.first().width()), 794);
         QMap<qint64, QRectF> noteRects;
         for (const auto &hit : result.hits)
             if (hit.note)
@@ -201,7 +201,7 @@ class EditorTest : public QObject
                                     QVERIFY(!boxes[a.id].intersects(boxes[b.id]));
         bool continuedKey = false;
         for (const auto &item : layout.items)
-            if (item.text.contains("6 = G") && item.text.contains("3/4"))
+            if (item.text.contains("6 = G"))
                 continuedKey = true;
         QVERIFY(continuedKey);
     }

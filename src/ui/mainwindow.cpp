@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "mainwindow.h"
+#include "input/inputcontroller.h"
+#include "layoutpanel.h"
 #include "scorecanvas.h"
+#include "sourceeditor.h"
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -9,6 +12,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDockWidget>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -22,9 +26,11 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 
@@ -50,6 +56,60 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), m_document(this)
     resize(1380, 940);
     if (!m_document.newScore())
         showError(m_document.error());
+    m_input = new InputController(&m_document, m_canvas, this);
+    connect(m_input, &InputController::error, this,
+            [this](const QString &error)
+            {
+                statusBar()->showMessage(error, 12000);
+                m_report->setPlainText(error);
+            });
+    auto *layoutDock = new QDockWidget(tr("排版"), this);
+    layoutDock->setObjectName("layoutDock");
+    layoutDock->setWidget(new LayoutPanel(&m_document));
+    addDockWidget(Qt::RightDockWidgetArea, layoutDock);
+    auto *action = new QAction(tr("排版设置"), this);
+    action->setShortcut(QKeySequence("Ctrl+Shift+L"));
+    addAction(action);
+    connect(action, &QAction::triggered, this,
+            [layoutDock]
+            {
+                layoutDock->show();
+                layoutDock->raise();
+                layoutDock->widget()->setFocus(Qt::ShortcutFocusReason);
+            });
+    auto *viewMenu = menuBar()->actions()[2]->menu();
+    viewMenu->addAction(layoutDock->toggleViewAction());
+    auto *voiceDock = findChild<QDockWidget *>("voicesDock");
+    auto *paletteDock = findChild<QDockWidget *>("paletteDock");
+    auto *sourceDock = findChild<QDockWidget *>("sourceDock");
+    auto *propertiesDock = findChild<QDockWidget *>("propertiesDock");
+    if (voiceDock && paletteDock)
+        tabifyDockWidget(voiceDock, paletteDock);
+    if (voiceDock && sourceDock)
+    {
+        tabifyDockWidget(voiceDock, sourceDock);
+        sourceDock->raise();
+    }
+    if (propertiesDock)
+    {
+        tabifyDockWidget(propertiesDock, layoutDock);
+        layoutDock->raise();
+    }
+    if (auto *report = findChild<QDockWidget *>("reportDock"))
+        report->setMaximumHeight(130);
+    QTimer::singleShot(0, this,
+                       [this, sourceDock, layoutDock]
+                       {
+                           resizeDocks({sourceDock, layoutDock}, {350, 280}, Qt::Horizontal);
+                           auto *area = qobject_cast<QScrollArea *>(centralWidget());
+                           if (area && !m_document.viewSettings().contains("zoom") &&
+                               m_canvas->layoutResult().size.width() > 0)
+                               m_canvas->setZoom(
+                                   std::clamp((area->viewport()->width() - 24) /
+                                                  m_canvas->layoutResult().size.width(),
+                                              0.35, 1.0));
+                       });
+
     refresh();
 }
 void MainWindow::buildMenus()
@@ -74,7 +134,7 @@ void MainWindow::buildMenus()
         {
             QString path = QFileDialog::getOpenFileName(
                 this, tr("打开曲谱"), {},
-                tr("曲谱 (*.jianpu *.musicxml *.xml *.mxl *.mid *.midi)"));
+                tr("曲谱 (*.jianpu *.musicxml *.xml *.mxl *.mid *.midi *.txt *.jptxt)"));
             if (!path.isEmpty())
                 openPath(path);
         },
@@ -85,10 +145,41 @@ void MainWindow::buildMenus()
     for (const auto &format : {"musicxml", "mxl", "mid"})
         exportMenu->addAction(QString::fromLatin1(format).toUpper(), this,
                               [this, format] { exportFormat(format); });
+    file->addAction(tr("导出文字稿…"), this,
+                    [this]
+                    {
+                        if (m_input && !m_input->flush())
+                            return;
+                        auto path = QFileDialog::getSaveFileName(
+                            this, tr("导出文字稿"), {}, tr("UTF-8 文字稿 (*.jptxt *.txt)"));
+                        if (path.isEmpty())
+                            return;
+                        QSaveFile file(path);
+                        auto bytes = m_document.sourceText().toUtf8();
+                        if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() ||
+                            !file.commit())
+                            showError(tr("文字稿保存失败"));
+                    });
     file->addSeparator();
     file->addAction(tr("退出"), this, &QWidget::close, QKeySequence::Quit);
-    m_undo = edit->addAction(tr("撤销"), &m_document, &ScoreDocument::undo, QKeySequence::Undo);
-    m_redo = edit->addAction(tr("重做"), &m_document, &ScoreDocument::redo, QKeySequence::Redo);
+    m_undo = edit->addAction(
+        tr("撤销"), this,
+        [this]
+        {
+            if (m_input)
+                m_input->flush();
+            m_document.undo();
+        },
+        QKeySequence::Undo);
+    m_redo = edit->addAction(
+        tr("重做"), this,
+        [this]
+        {
+            if (m_input)
+                m_input->flush();
+            m_document.redo();
+        },
+        QKeySequence::Redo);
     edit->addSeparator();
     edit->addAction(tr("复制"), m_canvas, &ScoreCanvas::copy, QKeySequence::Copy);
     edit->addAction(tr("粘贴"), m_canvas, &ScoreCanvas::paste, QKeySequence::Paste);
@@ -202,22 +293,25 @@ void MainWindow::buildMenus()
                     {EditRequest::Kind::SetTime, {}, pieces[0].toInt(), pieces[1].toInt()});
         });
     auto *help = menuBar()->addMenu(tr("帮助"));
-    help->addAction(tr("快捷键"), this,
-                    [this]
-                    {
-                        QMessageBox::information(
-                            this, tr("简谱编辑"),
-                            tr("点击选择，Shift+点击扩展范围，框选多个音符。\n1–7 修改音高，0 "
-                               "输入休止符；N 切换连续输入。\n← → 选择前后音符，↑ ↓ "
-                               "改音高，Ctrl+↑↓ 改八度。\nL 编辑歌词，Ctrl+C/V 复制粘贴，Ctrl+Z/Y "
-                               "撤销重做。\n跨音符记号需选择同一声部的起止音符。"));
-                    });
+    help->addAction(
+        tr("快捷键"), this,
+        [this]
+        {
+            QMessageBox::information(
+                this, tr("简谱编辑"),
+                tr("点击选择，Shift+点击扩展范围，框选多个音符。\n1–7 修改音高，0 "
+                   "输入休止符；N 切换连续输入。\n← → 选择前后音符，↑ ↓ "
+                   "改音高，Ctrl+↑↓ 切换声部。\nF6 切换文字／谱面输入；Esc 返回命令。B/Z/D/P "
+                   "编辑题目、词曲、调号、拍号；Q 新声部，C 新歌词；/ 减时，- 增时，' 和 , "
+                   "改八度。\nL 编辑所选歌词，Ctrl+C/V 复制粘贴，Ctrl+Z/Y "
+                   "撤销重做。\n跨音符记号需选择同一声部的起止音符。"));
+        });
     help->addAction(tr("关于"), this,
                     [this]
                     {
                         QMessageBox::about(
                             this, tr("简谱实验室"),
-                            tr("简谱实验室 0.2\nC++20 / Qt 6.10.2\n使用 MuseScore GPLv3 "
+                            tr("简谱实验室 0.3\nC++20 / Qt 6.10.2\n使用 MuseScore GPLv3 "
                                "乐谱内核。\n版权与第三方许可见发行目录 licenses。"));
                     });
 }
@@ -316,7 +410,7 @@ void MainWindow::buildPanels()
     m_selectionInfo->setWordWrap(true);
     form->addRow(m_selectionInfo);
     m_verse = new QSpinBox;
-    m_verse->setRange(1, 16);
+    m_verse->setRange(1, 1024);
     form->addRow(tr("歌词段数"), m_verse);
     m_lyrics = new QLineEdit;
     m_lyrics->setObjectName("lyricsEditor");
@@ -386,9 +480,10 @@ void MainWindow::refresh()
         if (voice.track == m_canvas->activeTrack())
             m_voices->setCurrentItem(item);
     }
-    m_report->setPlainText(m_canvas->score().warnings.isEmpty()
-                               ? tr("曲谱已载入，未发现导入警告。")
-                               : m_canvas->score().warnings.join('\n'));
+    auto reports =
+        m_canvas->score().warnings + m_document.inputMessages() + m_canvas->layoutResult().warnings;
+    m_report->setPlainText(reports.isEmpty() ? tr("曲谱已载入，未发现导入警告。")
+                                             : reports.join('\n'));
     statusBar()->showMessage(tr("%1 小节 · %2 声部 · %3 音符")
                                  .arg(m_canvas->score().measures.size())
                                  .arg(m_canvas->score().voices.size())
@@ -508,6 +603,8 @@ void MainWindow::showError(const QString &error)
 }
 bool MainWindow::confirmDiscard()
 {
+    if (m_input && !m_input->flush())
+        return false;
     if (!m_document.modified())
         return true;
     auto answer = QMessageBox::question(
@@ -519,6 +616,8 @@ bool MainWindow::confirmDiscard()
 }
 bool MainWindow::save(bool saveAs)
 {
+    if (m_input && !m_input->flush())
+        return false;
     QString path = m_document.filePath();
     if (saveAs || path.isEmpty())
         path =
@@ -606,6 +705,8 @@ bool MainWindow::openPath(const QString &path, bool interactive)
 }
 void MainWindow::exportFormat(const QString &extension)
 {
+    if (m_input && !m_input->flush())
+        return;
     auto path =
         QFileDialog::getSaveFileName(this, tr("导出曲谱"), {}, tr("曲谱 (*.%1)").arg(extension));
     if (path.isEmpty())

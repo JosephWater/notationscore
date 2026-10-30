@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "core/runtime.h"
+#include "layout/layoutsettings.h"
 #include "ui/mainwindow.h"
 #include "ui/scorecanvas.h"
 #include <QApplication>
@@ -15,18 +16,21 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName("JianpuLab");
     QCoreApplication::setOrganizationName("JianpuLab");
-    QCoreApplication::setApplicationVersion("0.2.0");
+    QCoreApplication::setApplicationVersion("0.3.0");
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("C++ 多声部简谱编辑器"));
     parser.addHelpOption();
     parser.addVersionOption();
-    parser.addPositionalArgument("file", QStringLiteral("打开 MusicXML、MIDI 或 .jianpu 工程"));
+    parser.addPositionalArgument("file",
+                                 QStringLiteral("打开 MusicXML、MIDI、文字稿或 .jianpu 工程"));
     parser.addOption({"render", QStringLiteral("将完整简谱画布输出 PNG 并退出"), "file"});
     parser.addOption({"screenshot", QStringLiteral("将主窗口输出 PNG 并退出"), "file"});
     parser.addOption(
         {"export", QStringLiteral("按扩展名导出 MusicXML、MXL 或 MIDI 并退出"), "file"});
     parser.addOption({"save-project", QStringLiteral("保存 .jianpu 工程并退出"), "file"});
     parser.addOption({"inspect", QStringLiteral("输出曲谱统计 JSON 并退出")});
+    parser.addOption(
+        {"layout-preset", QStringLiteral("选择排版预设：classic / modern / children"), "name"});
     parser.addOption({"smoke", QStringLiteral("启动冒烟验证后自动退出")});
     parser.process(app);
     jianpu::EngineRuntime runtime;
@@ -36,6 +40,18 @@ int main(int argc, char **argv)
     {
         qCritical().noquote() << window.document()->error();
         return 1;
+    }
+    if (parser.isSet("layout-preset"))
+    {
+        auto name = parser.value("layout-preset");
+        if (name != "classic" && name != "modern" && name != "children")
+        {
+            qCritical() << "Invalid layout preset";
+            return 4;
+        }
+        auto view = window.document()->viewSettings();
+        view["layout"] = jianpu::LayoutSettings::defaults(name);
+        window.document()->setViewSettings(view);
     }
     if (parser.isSet("export"))
     {

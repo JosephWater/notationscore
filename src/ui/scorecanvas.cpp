@@ -2,6 +2,7 @@
 #include "scorecanvas.h"
 #include <QApplication>
 #include <QClipboard>
+#include <QJsonArray>
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -45,6 +46,58 @@ void ScoreCanvas::refresh()
     if (!activeExists && !m_score.voices.isEmpty())
         m_track = m_score.voices.first().track;
     m_layout = JianpuLayout().layout(m_score, m_document->viewSettings());
+    QSet<QString> inputEvents;
+    for (const auto &measure : m_score.measures)
+        for (const auto &event : measure.events)
+            if (!event.logicalId.isEmpty())
+                inputEvents.insert(event.id);
+    for (auto value : m_document->inputState().value("pendingSpans").toArray())
+    {
+        auto pending = value.toObject();
+        int track = pending["track"].toInt();
+        qint64 tick = pending["tick"].toVariant().toLongLong();
+        QMap<int, QPair<QPointF, QPointF>> rows;
+        int count = 0;
+        for (const auto &hit : m_layout.hits)
+            if (hit.track == track && hit.tick >= tick && !hit.eventId.isEmpty() &&
+                inputEvents.contains(hit.eventId))
+            {
+                auto point = QPointF(hit.rect.center().x(), hit.rect.top() - 14);
+                int row = qRound(point.y() / 10);
+                if (!rows.contains(row))
+                    rows[row] = {point, point};
+                else
+                    rows[row].second = point;
+                ++count;
+            }
+        for (auto row : rows)
+        {
+            auto a = row.first, b = row.second;
+            if (b.x() < a.x() + 55)
+                b.setX(a.x() + 55);
+            LayoutItem item;
+            item.id = "input-preview";
+            item.kind = LayoutItem::Kind::Curve;
+            item.penStyle = Qt::DashLine;
+            item.color = QColor("#8798ae");
+            item.strokeWidth = 1.4;
+            item.path.moveTo(a);
+            item.path.cubicTo(a + QPointF(15, -15), b + QPointF(-15, -15), b);
+            item.bounds = item.path.boundingRect();
+            m_layout.items << item;
+            if (pending["kind"].toString() == "tuplet")
+            {
+                LayoutItem label;
+                label.kind = LayoutItem::Kind::Text;
+                label.text = QString("%1?").arg(count);
+                label.bounds = QRectF(a.x(), a.y() - 30, b.x() - a.x(), 20);
+                label.fontSize = 12;
+                label.color = item.color;
+                m_layout.items << label;
+            }
+        }
+    }
+
     QStringList valid;
     for (const auto &id : m_selection)
         for (const auto &hit : m_layout.hits)
@@ -108,18 +161,20 @@ void ScoreCanvas::paintScore(QPainter &p, const QRectF &exposed) const
     {
         if (!item.bounds.adjusted(-20, -20, 20, 20).intersects(exposed))
             continue;
-        QColor color = m_selection.contains(item.id) ? QColor("#1262bd") : QColor("#20252b");
-        p.setPen(QPen(color, 1.2));
+        QColor color = item.color.isValid() ? item.color
+                                            : (m_selection.contains(item.id) ? QColor("#1262bd")
+                                                                             : QColor("#20252b"));
+        p.setPen(QPen(color, item.strokeWidth, item.penStyle));
         p.setBrush(color);
         switch (item.kind)
         {
         case LayoutItem::Kind::Text:
         {
-            QFont font(item.bold ? "FreeSans" : "");
-            font.setPixelSize(qRound(item.fontSize));
+            QFont font(item.fontFamily);
+            font.setPointSizeF(item.fontSize * 0.75);
             font.setBold(item.bold);
             p.setFont(font);
-            p.drawText(item.bounds, Qt::AlignCenter, item.text);
+            p.drawText(item.bounds, item.alignment, item.text);
             break;
         }
         case LayoutItem::Kind::Line:
@@ -131,6 +186,17 @@ void ScoreCanvas::paintScore(QPainter &p, const QRectF &exposed) const
             p.drawEllipse(item.bounds);
             break;
         }
+    }
+    if (m_keyboardInput && !m_selection.isEmpty())
+    {
+        for (const auto &hit : m_layout.hits)
+            if (m_selection.contains(hit.id))
+            {
+                p.setPen(QPen(QColor("#2572c3"), 1.5));
+                p.drawLine(QPointF(hit.rect.right() + 7, hit.rect.top()),
+                           QPointF(hit.rect.right() + 7, hit.rect.bottom()));
+                break;
+            }
     }
     if (m_dragging)
     {

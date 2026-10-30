@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "core/scoretypes.h"
+#include <QColor>
 #include <QFont>
 #include <QHash>
 #include <QPainterPath>
@@ -25,6 +26,11 @@ struct LayoutItem
     qreal fontSize = 24;
     int track = -1;
     bool bold = false;
+    QString fontFamily;
+    qreal strokeWidth = 1.2;
+    Qt::PenStyle penStyle = Qt::SolidLine;
+    Qt::Alignment alignment = Qt::AlignCenter;
+    QColor color;
 };
 struct HitRegion
 {
@@ -43,6 +49,7 @@ struct LayoutResult
     QVector<LayoutItem> items;
     QVector<HitRegion> hits;
     QSizeF size;
+    QStringList warnings;
     const HitRegion *hitTest(QPointF point) const;
 };
 class JianpuLayout

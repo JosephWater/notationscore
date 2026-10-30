@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "scoredocument.h"
 #include "engraving/dom/articulation.h"
+#include "engraving/dom/barline.h"
+#include "engraving/dom/beam.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/factory.h"
@@ -173,12 +175,42 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
     m_error.clear();
     if (!QFileInfo::exists(path))
         return fail(tr("文件不存在：%1").arg(path));
+    auto extension = QFileInfo(path).suffix().toLower();
+    if (extension == "txt" || extension == "jptxt")
+    {
+        QFile input(path);
+        if (!input.open(QIODevice::ReadOnly))
+            return fail(input.errorString());
+        auto bytes = input.readAll();
+        auto text = QString::fromUtf8(bytes);
+        if (text.startsWith(QChar(0xfeff)))
+            text.remove(0, 1);
+        text.replace("\r\n", "\n").replace('\r', '\n');
+        ScoreDocument candidate;
+        if (!candidate.newScore() || !candidate.applyText(text))
+            return fail(candidate.error());
+        m_project = candidate.m_project;
+        m_input = candidate.m_input;
+        m_view = {};
+        m_savedView = {};
+        m_path.clear();
+        m_imported = true;
+        m_history.clear();
+        m_states = {0};
+        m_cursor = 0;
+        m_savedState = 0;
+        m_mergeKey.clear();
+        m_warnings.clear();
+        notify();
+        emit loaded();
+        return true;
+    }
     ScoreLoad loading;
     auto candidate = EngravingProject::create(context());
     auto *score = candidate->masterScore();
     candidate->setFileInfoProvider(std::make_shared<LocalFileInfoProvider>(muse::io::path_t(path)));
     const auto suffix = QFileInfo(path).suffix().toLower();
-    QJsonObject newView;
+    QJsonObject newView, newInput;
     QStringList newWarnings;
     bool native = suffix == "jianpu";
     try
@@ -190,7 +222,8 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
                 return fail(tr("不是有效的简谱工程"));
             auto manifest =
                 QJsonDocument::fromJson(zip.fileData("manifest.json").toQByteArray()).object();
-            if (manifest.value("schemaVersion").toInt() != 1)
+            if (manifest.value("schemaVersion").toInt() < 1 ||
+                manifest.value("schemaVersion").toInt() > 2)
                 return fail(tr("不支持此工程版本"));
             if (manifest.value("engineRevision").toString() != EngineRevision)
                 return fail(tr("此工程来自不同版本的乐谱内核"));
@@ -202,6 +235,16 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
             if (jsonError.error != QJsonParseError::NoError || !viewDoc.isObject())
                 return fail(tr("工程显示设置损坏"));
             newView = viewDoc.object();
+            if (manifest.value("schemaVersion").toInt() == 2 && !zip.fileExists("input.json"))
+                return fail(tr("工程缺少文字稿数据"));
+            if (zip.fileExists("input.json"))
+            {
+                auto inputDoc =
+                    QJsonDocument::fromJson(zip.fileData("input.json").toQByteArray(), &jsonError);
+                if (jsonError.error != QJsonParseError::NoError || !inputDoc.isObject())
+                    return fail(tr("工程文字稿损坏"));
+                newInput = inputDoc.object();
+            }
             auto bytes = zip.fileData("score.mscz");
             muse::io::Buffer buffer(&bytes);
             buffer.open(muse::io::IODevice::ReadOnly);
@@ -330,9 +373,31 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
         auto ret = candidate->setupMasterScore(false);
         if (!ret)
             return fail(tr("曲谱结构检查失败：%1").arg(retError(ret)));
+        if (!newInput.isEmpty())
+        {
+            if (newInput.value("format").toString("fanqie-1.0") != "fanqie-1.0")
+                return fail(tr("不支持此文字稿格式"));
+            const auto sourceSize = newInput.value("source").toString().size();
+            for (auto value : newInput.value("bindings").toArray())
+            {
+                auto b = value.toObject();
+                auto denominator = b.value("d").toInteger(0);
+                auto numerator = b.value("n").toInteger(-1);
+                int offset = b.value("offset").toInt(-1), length = b.value("length").toInt(0),
+                    track = b.value("track").toInt(-1);
+                if (denominator <= 0 || numerator < 0 || offset < 0 || length < 1 ||
+                    qint64(offset) + length > sourceSize || track < 0 ||
+                    track >= int(score->ntracks()))
+                    return fail(tr("文字稿元素关联损坏"));
+            }
+        }
+        score->rebuildMidiMapping();
         m_project = std::move(candidate);
         m_path = native ? path : QString();
         m_view = newView;
+        m_input = newInput;
+        m_history.clear();
+        m_mergeKey.clear();
         m_savedView = newView;
         m_imported = !native;
         m_warnings = newWarnings;
@@ -345,6 +410,7 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
         m_cursor = 0;
         m_savedState = 0;
         notify();
+        emit loaded();
         return true;
     }
     catch (const std::exception &e)
@@ -375,13 +441,14 @@ bool ScoreDocument::save(const QString &path)
         return fail(tr("曲谱压缩失败"));
     auto container = muse::io::Buffer::opened(muse::io::IODevice::WriteOnly);
     muse::ZipWriter zip(&container);
-    QJsonObject manifest{{"schemaVersion", 1},
+    QJsonObject manifest{{"schemaVersion", 2},
                          {"engineRevision", EngineRevision},
                          {"application", "JianpuLab"},
                          {"importWarnings", QJsonArray::fromStringList(m_warnings)}};
     zip.addFile("manifest.json", muse::ByteArray::fromQByteArray(QJsonDocument(manifest).toJson()));
     zip.addFile("score.mscz", native.data());
     zip.addFile("view.json", muse::ByteArray::fromQByteArray(QJsonDocument(m_view).toJson()));
+    zip.addFile("input.json", muse::ByteArray::fromQByteArray(QJsonDocument(m_input).toJson()));
     zip.close();
     if (zip.hasError())
         return fail(tr("工程打包失败"));
@@ -400,12 +467,15 @@ bool ScoreDocument::exportFile(const QString &path)
     m_error.clear();
     if (!m_project)
         return fail(tr("没有打开的曲谱"));
+    if (m_input.value("hasErrors").toBool())
+        return fail(tr("请先解决文字稿中的错误或待分配歌词，再导出。"));
     const auto suffix = QFileInfo(path).suffix().toLower();
     QTemporaryDir dir;
     if (!dir.isValid())
         return fail(tr("无法创建导出临时目录"));
     QString temp = dir.filePath("export." + suffix);
     auto *score = m_project->masterScore();
+    score->rebuildMidiMapping();
     bool ok = false;
     if (suffix == "mid" || suffix == "midi")
         ok = mu::iex::midi::ExportMidi(score).write(temp, true, false);
@@ -431,7 +501,7 @@ bool ScoreDocument::newScore()
         return fail(file.errorString());
     QByteArray xml =
         R"(<?xml version="1.0" encoding="utf-8"?><score-partwise version="4.0"><work><work-title>未命名曲谱</work-title></work><part-list><score-part id="P1"><part-name>旋律</part-name></score-part></part-list><part id="P1">)";
-    for (int i = 1; i <= 4; ++i)
+    for (int i = 1; i <= 1; ++i)
     {
         xml += "<measure number=\"" + QByteArray::number(i) + "\">";
         if (i == 1)
@@ -444,13 +514,23 @@ bool ScoreDocument::newScore()
     xml += "</part></score-partwise>";
     file.write(xml);
     file.close();
-    return open(file.fileName());
+    if (!open(file.fileName()))
+        return false;
+    m_input = {{"format", "fanqie-1.0"},
+               {"source", QStringLiteral("V: 1.0\nB: 未命名曲谱\nD: C\nP: 4/4\nQ: ")},
+               {"bindings", QJsonArray()}};
+    m_imported = true;
+    notify();
+    return true;
 }
 
 bool ScoreDocument::edit(const EditRequest &request)
 {
     if (!m_project)
         return fail(tr("没有打开的曲谱"));
+    const auto previousState = historyState();
+    const auto previousSnapshot = snapshot();
+    m_mergeKey.clear();
     auto *score = m_project->masterScore();
     std::vector<EngravingItem *> items;
     for (const auto &id : request.ids)
@@ -631,9 +711,9 @@ bool ScoreDocument::edit(const EditRequest &request)
         }
         case K::Lyrics:
         {
-            if (!firstCR || !firstCR->isChord() || request.value < 0 || request.value > 15)
+            if (!firstCR || !firstCR->isChord() || request.value < 0 || request.value > 1023)
             {
-                reject(tr("歌词需要附着在音符上，段数范围 1–16"));
+                reject(tr("歌词需要附着在音符上，段数范围 1–1024"));
                 break;
             }
             Lyrics *lyric = nullptr;
@@ -989,9 +1069,8 @@ bool ScoreDocument::edit(const EditRequest &request)
         return fail(message);
     if (score->undoStack()->currentIndex() != before)
     {
-        m_states.resize(m_cursor + 1);
-        m_states.push_back(m_nextState++);
-        ++m_cursor;
+        syncSourceAfterEdit(request, previousSnapshot);
+        recordChange(previousState, true);
     }
     notify();
     return true;
@@ -1063,6 +1142,26 @@ ScoreSnapshot ScoreDocument::snapshot() const
     if (!m_project)
         return result;
     auto *score = m_project->masterScore();
+    auto subtitles =
+        QJsonDocument::fromJson(score->metaTag(u"jianpuSubtitles").toQString().toUtf8()).array();
+    for (auto v : subtitles)
+        result.subtitles << v.toString();
+    auto lyricRows = m_input.value("verseRows").toObject();
+    for (auto it = lyricRows.begin(); it != lyricRows.end(); ++it)
+        result.lyricRows[it.key().toInt()] = it.value().toInt();
+    auto authors =
+        QJsonDocument::fromJson(score->metaTag(u"jianpuAuthors").toQString().toUtf8()).array();
+    for (auto v : authors)
+        result.authors << v.toString();
+    if (result.authors.isEmpty())
+    {
+        auto composer = score->metaTag(u"composer").toQString();
+        auto lyricist = score->metaTag(u"lyricist").toQString();
+        if (!lyricist.isEmpty())
+            result.authors << lyricist + QStringLiteral(" 词");
+        if (!composer.isEmpty())
+            result.authors << composer + QStringLiteral(" 曲");
+    }
     result.title = score->metaTag(u"workTitle").toQString();
     if (result.title.isEmpty())
         result.title = tr("未命名曲谱");
@@ -1084,6 +1183,7 @@ ScoreSnapshot ScoreDocument::snapshot() const
         measure.denominator = m->timesig().denominator();
         measure.repeatStart = m->repeatStart();
         measure.repeatEnd = m->repeatEnd();
+        measure.barline = int(m->endBarLineType());
         for (auto *segment = m->first(); segment; segment = segment->next())
         {
             if (!segment->isChordRestType())
@@ -1104,6 +1204,17 @@ ScoreSnapshot ScoreDocument::snapshot() const
                     cr->durationType().isMeasure()
                         ? 0
                         : TDuration(cr->durationType().type()).fraction().denominator();
+                event.position = {cr->tick().numerator(), cr->tick().denominator()};
+                event.length = {cr->actualTicks().numerator(), cr->actualTicks().denominator()};
+                event.visible = cr->visible();
+                if (cr->beam() &&
+                    std::any_of(cr->beam()->elements().begin(), cr->beam()->elements().end(),
+                                [](const auto *member)
+                                {
+                                    return member->beamMode() != BeamMode::AUTO &&
+                                           member->beamMode() != BeamMode::INVALID;
+                                }))
+                    event.beamGroup = idFor(cr->beam());
                 event.dots = cr->dots();
                 event.rest = cr->isRest();
                 event.tuplet = cr->tuplet() ? cr->tuplet()->ratio().numerator() : 0;
@@ -1162,6 +1273,8 @@ ScoreSnapshot ScoreDocument::snapshot() const
                         n.step = tpc2step(note->tpc1());
                         n.alter = int(tpc2alter(note->tpc1()));
                         n.octave = (n.midi - n.alter) / 12 - 1;
+                        if (note->headGroup() == NoteHeadGroup::HEAD_CROSS)
+                            event.rhythm = true;
                         n.tieStart = note->tieFor();
                         n.tieEnd = note->tieBack();
                         event.notes.push_back(n);
@@ -1192,7 +1305,14 @@ ScoreSnapshot ScoreDocument::snapshot() const
                         g.keyFifths = event.keyFifths;
                         g.tick = event.tick;
                         g.grace = true;
-                        g.denominator = 8;
+                        g.position = event.position;
+                        g.graceAfter = grace->noteType() == NoteType::GRACE8_AFTER ||
+                                       grace->noteType() == NoteType::GRACE16_AFTER ||
+                                       grace->noteType() == NoteType::GRACE32_AFTER;
+                        g.denominator =
+                            TDuration(grace->durationType().type()).fraction().denominator();
+                        if (grace->beam())
+                            g.beamGroup = idFor(grace->beam());
                         for (auto *note : grace->notes())
                         {
                             NoteData n;
@@ -1214,10 +1334,14 @@ ScoreSnapshot ScoreDocument::snapshot() const
     for (int track : sorted)
     {
         auto *staff = score->staff(size_t(track / 4));
-        result.voices.push_back(
-            {track,
-             tr("%1 · 声部 %2").arg(staff->part()->partName().toQString()).arg(track % 4 + 1),
-             staff->isDrumStaff(Fraction(0, 1))});
+        int count = 0;
+        for (int other : sorted)
+            if (other / 4 == track / 4)
+                ++count;
+        auto name = staff->part()->partName().toQString();
+        if (count > 1)
+            name = tr("%1 · 声部 %2").arg(name).arg(track % 4 + 1);
+        result.voices.push_back({track, name, staff->isDrumStaff(Fraction(0, 1))});
     }
     QSet<QString> known;
     score->scanElements(
@@ -1254,12 +1378,14 @@ ScoreSnapshot ScoreDocument::snapshot() const
                 kind = "fermata";
                 text = QStringLiteral("𝄐");
             }
-            else if (item->isKeySig() && item->tick().isNotZero())
+            else if (item->isKeySig() && !item->generated() && !toKeySig(item)->isCourtesy() &&
+                     item->tick().isNotZero())
             {
                 kind = toKeySig(item)->keySigEvent().mode() == KeyMode::MINOR ? "minor-key" : "key";
                 text = QString::number(int(toKeySig(item)->keySigEvent().concertKey()));
             }
-            else if (item->isTimeSig() && item->tick().isNotZero())
+            else if (item->isTimeSig() && !item->generated() && !toTimeSig(item)->isCourtesy() &&
+                     item->tick().isNotZero())
             {
                 kind = "time";
                 auto sig = toTimeSig(item)->sig();
@@ -1305,42 +1431,97 @@ ScoreSnapshot ScoreDocument::snapshot() const
              spanner->endElement() ? idFor(spanner->endElement()) : QString()});
     }
     result.warnings.removeDuplicates();
+    QMap<int, QMap<MusicalTime, EventData *>> eventsByPosition;
+    for (auto &measure : result.measures)
+        for (auto &event : measure.events)
+            if (!event.grace)
+                eventsByPosition[event.track][event.position] = &event;
+    for (auto binding : m_input.value("bindings").toArray())
+    {
+        auto o = binding.toObject();
+        auto denominator = o.value("d").toInteger(0);
+        if (denominator <= 0)
+            continue;
+        MusicalTime position(o.value("n").toInteger(), denominator);
+        if (auto *event = eventsByPosition[o["track"].toInt()].value(position, nullptr))
+        {
+            event->logicalId = o["id"].toString();
+            event->sourceStart = o["offset"].toInt();
+            event->sourceLength = o["length"].toInt();
+            event->sourceBreak = o["break"].toBool();
+        }
+    }
     return result;
 }
-bool ScoreDocument::canUndo() const
-{
-    return m_project && m_project->masterScore()->undoStack()->canUndo();
-}
-bool ScoreDocument::canRedo() const
-{
-    return m_project && m_project->masterScore()->undoStack()->canRedo();
-}
+bool ScoreDocument::canUndo() const { return m_project && m_cursor > 0; }
+bool ScoreDocument::canRedo() const { return m_project && m_cursor < m_history.size(); }
 bool ScoreDocument::modified() const
 {
     return m_project &&
            (m_imported || m_view != m_savedView || m_states.at(m_cursor) != m_savedState);
 }
-void ScoreDocument::setViewSettings(const QJsonObject &value)
+void ScoreDocument::setViewSettings(const QJsonObject &value, const QString &mergeKey)
 {
+    if (m_view == value)
+        return;
+    auto previous = historyState();
     m_view = value;
+    recordChange(previous, false, mergeKey);
     notify();
+}
+void ScoreDocument::recordChange(const HistoryState &before, bool engine, const QString &key)
+{
+    bool merge = !key.isEmpty() && key == m_mergeKey && m_cursor > 0 &&
+                 m_cursor == m_history.size() && m_history.last().mergeKey == key && !engine &&
+                 !m_history.last().engine && m_states[m_cursor] != m_savedState;
+    if (merge)
+    {
+        m_history.last().after = historyState();
+        m_states[m_cursor] = m_nextState++;
+    }
+    else
+    {
+        m_history.resize(m_cursor);
+        m_states.resize(m_cursor + 1);
+        m_history.push_back({before, historyState(), engine, key});
+        m_states << m_nextState++;
+        ++m_cursor;
+    }
+    m_mergeKey = key;
+    if (m_history.size() > 128)
+    {
+        int remove = m_history.size() - 128;
+        m_history.remove(0, remove);
+        m_states.remove(0, remove);
+        m_cursor -= remove;
+    }
 }
 void ScoreDocument::undo()
 {
-    if (canUndo())
-    {
-        m_project->masterScore()->undoRedo(true, nullptr);
-        --m_cursor;
-        notify();
-    }
+    if (!canUndo())
+        return;
+    const auto &entry = m_history[m_cursor - 1];
+    if (entry.engine)
+        entry.after.project->masterScore()->undoRedo(true, nullptr);
+    m_project = entry.before.project;
+    m_view = entry.before.view;
+    m_input = entry.before.input;
+    --m_cursor;
+    m_mergeKey.clear();
+    notify();
 }
 void ScoreDocument::redo()
 {
-    if (canRedo())
-    {
-        m_project->masterScore()->undoRedo(false, nullptr);
-        ++m_cursor;
-        notify();
-    }
+    if (!canRedo())
+        return;
+    const auto &entry = m_history[m_cursor];
+    if (entry.engine)
+        entry.before.project->masterScore()->undoRedo(false, nullptr);
+    m_project = entry.after.project;
+    m_view = entry.after.view;
+    m_input = entry.after.input;
+    ++m_cursor;
+    m_mergeKey.clear();
+    notify();
 }
 } // namespace jianpu

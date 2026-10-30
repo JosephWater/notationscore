@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "jianpulayout.h"
+#include "layoutsettings.h"
 #include <QFontMetricsF>
 #include <QJsonArray>
 #include <QMap>
@@ -12,8 +13,6 @@ namespace jianpu
 namespace
 {
 constexpr qreal PageWidth = 794;
-constexpr qreal Margin = 52;
-constexpr qreal ContentWidth = PageWidth - 2 * Margin;
 int positiveMod(int a, int b) { return (a % b + b) % b; }
 int tonicStep(int fifths) { return positiveMod(fifths * 4, 7); }
 int keyAlter(int step, int fifths)
@@ -24,12 +23,6 @@ int keyAlter(int step, int fifths)
         if ((fifths >= 0 ? sharps[i] : flats[i]) == step)
             return fifths >= 0 ? 1 : -1;
     return 0;
-}
-qreal textWidth(const QString &text, qreal size)
-{
-    QFont f(QStringLiteral("DejaVu Sans"));
-    f.setPixelSize(qRound(size));
-    return QFontMetricsF(f).horizontalAdvance(text);
 }
 qreal restTicks(const EventData &event)
 {
@@ -74,10 +67,80 @@ int JianpuLayout::octaveDots(const NoteData &n, int fifths)
     return int(std::floor((n.octave * 7 + n.step - (4 * 7 + tonicStep(fifths))) / 7.0));
 }
 
-LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject &settings) const
+LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
+                                  const QJsonObject &settings) const
 {
+    ScoreSnapshot score = inputScore;
+    auto timeOf = [](const EventData &e)
+    { return e.length == MusicalTime() ? MusicalTime(e.tick, 1920) : e.position; };
+    const auto style = LayoutSettings::fromJson(settings);
+    const qreal mm = 96.0 / 25.4;
+    qreal pageWidth = (style.landscape ? style.heightMm : style.widthMm) * mm;
+    const qreal pageHeight = (style.landscape ? style.widthMm : style.heightMm) * mm;
+    const qreal Margin = style.leftMm * mm;
+    const qreal contentWidth = std::max(80.0, pageWidth - Margin - style.rightMm * mm);
+    const qreal noteSize = style.notePt * 4 / 3, lyricSize = style.lyricPt * 4 / 3;
+    const qreal scale = noteSize / 26;
+    auto textWidth = [&](const QString &t, qreal sz)
+    {
+        auto f = style.font(sz, sz == lyricSize ? style.lyricBold : false);
+        if (sz == lyricSize && !style.lyricFont.isEmpty())
+            f.setFamily(style.lyricFont);
+        return QFontMetricsF(f).horizontalAdvance(t);
+    };
     LayoutResult out;
     out.revision = score.revision;
+    // A very dense measure can be continued at beat boundaries without changing music.
+    QVector<MeasureData> displayMeasures;
+    for (const auto &measure : score.measures)
+    {
+        QMap<qint64, int> onsets;
+        for (const auto &event : measure.events)
+            if (!event.grace)
+                onsets[event.tick] = 1;
+        const int capacity = std::max(3, int(contentWidth / (noteSize * 2.15 * style.noteGap)));
+        QVector<qint64> cuts{measure.tick};
+        int count = 0;
+        qint64 beat =
+            (measure.denominator == 8 && measure.numerator >= 6 && measure.numerator % 3 == 0)
+                ? 720
+                : 1920 / measure.denominator;
+        auto keys = onsets.keys();
+        for (int i = 0; i < keys.size(); ++i)
+        {
+            if (count >= capacity)
+            {
+                qint64 cut = keys[i] - ((keys[i] - measure.tick) % std::max<qint64>(1, beat));
+                if (cut <= cuts.last())
+                    cut = keys[i];
+                cuts << cut;
+                count = 0;
+                for (int j = i - 1; j >= 0 && keys[j] >= cut; --j)
+                    ++count;
+            }
+            ++count;
+        }
+        cuts << measure.tick + measure.duration;
+        for (int i = 0; i + 1 < cuts.size(); ++i)
+        {
+            MeasureData fragment = measure;
+            fragment.tick = cuts[i];
+            fragment.duration = cuts[i + 1] - cuts[i];
+            fragment.events.clear();
+            if (i > 0)
+                fragment.repeatStart = false;
+            if (i + 2 < cuts.size())
+            {
+                fragment.repeatEnd = false;
+                fragment.barline = 1;
+            }
+            for (const auto &event : measure.events)
+                if (event.tick >= cuts[i] && event.tick < cuts[i + 1])
+                    fragment.events << event;
+            displayMeasures << fragment;
+        }
+    }
+    score.measures = displayMeasures;
     QSet<int> hidden;
     for (const auto &v : settings.value("hiddenTracks").toArray())
         hidden.insert(v.toInt());
@@ -97,18 +160,16 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                      });
     if (voices.isEmpty() && !score.voices.isEmpty())
     {
-        out.pages.push_back(QRectF(24, 24, PageWidth, 1123));
+        out.pages.push_back(QRectF(24, 24, pageWidth, pageHeight));
         out.items.push_back({LayoutItem::Kind::Text,
                              {},
                              QStringLiteral("请在声部面板中显示有音高声部"),
                              QRectF(70, 130, 650, 35),
                              {},
                              20});
-        out.size = QSizeF(PageWidth + 48, 1171);
+        out.size = QSizeF(pageWidth + 48, pageHeight + 48);
         return out;
     }
-    qreal pageWidth = PageWidth;
-    qreal contentWidth = ContentWidth;
     QMap<int, qreal> rowHeights;
     QMap<int, int> maxChord;
     QMap<int, int> maxVerse;
@@ -117,7 +178,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
     for (const auto &v : voices)
     {
         maxChord[v.track] = 1;
-        maxVerse[v.track] = 0;
+        maxVerse[v.track] = score.lyricRows.value(v.track);
         maxDots[v.track] = 0;
     }
     for (const auto &m : score.measures)
@@ -134,12 +195,34 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
     qreal systemHeight = 36;
     for (const auto &v : voices)
     {
-        noteSpacing[v.track] = 54 + maxDots[v.track] * 12;
-        rowHeights[v.track] =
-            108 + maxChord[v.track] * noteSpacing[v.track] + maxVerse[v.track] * 24;
+        noteSpacing[v.track] = 40 * scale + maxDots[v.track] * 8;
+        rowHeights[v.track] = 10 * scale + maxChord[v.track] * noteSpacing[v.track] +
+                              maxVerse[v.track] * lyricSize * style.verseGap + style.voiceGap +
+                              style.lyricGap;
+        bool hasHairpin = false, hasDynamic = false;
+        for (const auto &mark : score.marks)
+            if (mark.track == v.track)
+            {
+                hasHairpin |= mark.kind == "hairpin";
+                hasDynamic |= mark.kind == "dynamic";
+            }
+        if (hasHairpin)
+            rowHeights[v.track] += 54;
+        else if (hasDynamic)
+            rowHeights[v.track] += 26;
+        if (voices.size() > 1 && style.showVoices)
+        {
+            rowHeights[v.track] += 48;
+            qreal content = maxChord[v.track] * noteSpacing[v.track] +
+                            maxVerse[v.track] * lyricSize * style.verseGap + style.lyricGap;
+            rowHeights[v.track] = std::max(rowHeights[v.track], content + (hasHairpin   ? 110
+                                                                           : hasDynamic ? 96
+                                                                                        : 60));
+        }
         systemHeight += rowHeights[v.track];
     }
-    qreal pageHeight = std::max(1123.0, systemHeight + 230.0);
+    if (systemHeight > pageHeight - (style.topMm + style.bottomMm) * mm - 110)
+        out.warnings << QStringLiteral("当前声部组超出页面高度，请减小字号或调整纸张。");
     int page = -1;
     qreal y = 0;
     auto text =
@@ -147,6 +230,9 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
     {
         out.items.push_back(
             {LayoutItem::Kind::Text, std::move(id), std::move(value), rect, {}, size, track, bold});
+        auto &item = out.items.last();
+        item.fontFamily = style.chineseFont;
+        item.strokeWidth = style.lineWidth;
     };
     auto line = [&](QString id, QPointF a, QPointF b, int track = -1)
     {
@@ -154,6 +240,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
         item.kind = LayoutItem::Kind::Line;
         item.id = std::move(id);
         item.track = track;
+        item.strokeWidth = style.lineWidth;
         item.path.moveTo(a);
         item.path.lineTo(b);
         item.bounds = item.path.boundingRect();
@@ -174,7 +261,45 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
         ++page;
         qreal top = 24 + page * (pageHeight + 24);
         out.pages.push_back(QRectF(24, top, pageWidth, pageHeight));
-        text({}, score.title, QRectF(24 + Margin, top + 32, contentWidth, 42), 28, -1, true);
+        qreal headerY = top + style.topMm * mm;
+        if (page == 0)
+        {
+            text({}, score.title, QRectF(24 + Margin, headerY, contentWidth, style.titlePt * 1.8),
+                 style.titlePt * 4 / 3, -1, style.titleBold);
+            if (!style.titleFont.isEmpty())
+                out.items.last().fontFamily = style.titleFont;
+            out.items.last().alignment = (style.titleAlign == "left"    ? Qt::AlignLeft
+                                          : style.titleAlign == "right" ? Qt::AlignRight
+                                                                        : Qt::AlignHCenter) |
+                                         Qt::AlignVCenter;
+            headerY += style.titlePt * 1.8 + style.headerGap;
+            for (const auto &subtitle : score.subtitles)
+            {
+                text({}, subtitle,
+                     QRectF(24 + Margin, headerY, contentWidth, style.subtitlePt * 1.8),
+                     style.subtitlePt * 4 / 3, -1, style.subtitleBold);
+                if (!style.subtitleFont.isEmpty())
+                    out.items.last().fontFamily = style.subtitleFont;
+                headerY += style.subtitlePt * 1.8 + 3;
+            }
+            for (const auto &author : score.authors)
+            {
+                text({}, author, QRectF(24 + Margin, headerY, contentWidth, style.authorPt * 1.8),
+                     style.authorPt * 4 / 3, -1, style.authorBold);
+                if (!style.authorFont.isEmpty())
+                    out.items.last().fontFamily = style.authorFont;
+                out.items.last().alignment = (style.authorAlign == "left"     ? Qt::AlignLeft
+                                              : style.authorAlign == "center" ? Qt::AlignHCenter
+                                                                              : Qt::AlignRight) |
+                                             Qt::AlignVCenter;
+                headerY += style.authorPt * 1.8 + 2;
+            }
+        }
+        else if (style.continuationTitle)
+        {
+            text({}, score.title, QRectF(24 + Margin, headerY, contentWidth, 24), 14);
+            headerY += 30;
+        }
         int fifths = score.keyFifths;
         bool minor = score.minor;
         qint64 keyTick = -1;
@@ -194,29 +319,38 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
             info += QStringLiteral("     %1/%2")
                         .arg(score.measures[firstMeasure].numerator)
                         .arg(score.measures[firstMeasure].denominator);
-        text({}, info, QRectF(24 + Margin, top + 88, contentWidth, 25), 16);
-        text({}, QString::number(page + 1),
-             QRectF(24 + Margin, top + pageHeight - 35, contentWidth, 20), 12);
-        y = top + 140;
+        text({}, info, QRectF(24 + Margin, headerY, contentWidth, 25), 16);
+        if (style.showPages)
+            text({}, QString::number(page + 1),
+                 QRectF(24 + Margin, top + pageHeight - 35, contentWidth, 20), 12);
+        y = headerY + 45;
     };
     struct MeasureMetrics
     {
-        QMap<qint64, qreal> x;
+        QMap<MusicalTime, qreal> x;
         qreal width = 0;
     };
     QVector<MeasureMetrics> metrics;
     QHash<QString, QString> noteLabels;
-    QMap<int, QMap<qint64, int>> graceCounts;
+    QMap<int, QMap<qint64, int>> graceCounts, afterGraceCounts;
     for (const auto &measure : score.measures)
         for (const auto &event : measure.events)
             if (event.grace)
-                ++graceCounts[event.track][event.tick];
+                if (event.graceAfter)
+                    ++afterGraceCounts[event.track][event.tick];
+                else
+                    ++graceCounts[event.track][event.tick];
     for (const auto &m : score.measures)
     {
         QMap<int, QMap<int, int>> accidentalState;
         auto events = m.events;
-        std::stable_sort(events.begin(), events.end(), [](const auto &a, const auto &b)
-                         { return a.tick != b.tick ? a.tick < b.tick : a.grace && !b.grace; });
+        std::stable_sort(events.begin(), events.end(),
+                         [](const auto &a, const auto &b)
+                         {
+                             return a.tick != b.tick ? a.tick < b.tick
+                                                     : (a.grace ? (a.graceAfter ? 2 : 0) : 1) <
+                                                           (b.grace ? (b.graceAfter ? 2 : 0) : 1);
+                         });
         for (const auto &event : events)
             for (const auto &note : event.notes)
             {
@@ -226,44 +360,52 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                 noteLabels[note.id] = noteText(note, event.keyFifths, natural);
                 accidentalState[event.track][degree] = delta;
             }
-        QMap<qint64, qreal> widths;
-        widths[m.tick] = 34;
+        QMap<MusicalTime, qreal> widths;
+        widths[MusicalTime(m.tick, 1920)] = 34;
         for (const auto &e : m.events)
         {
             if (!maxChord.contains(e.track))
                 continue;
-            qreal w = 54;
+            qreal w = 44 * scale * style.noteGap;
             for (const auto &n : e.notes)
-                w = std::max(w, textWidth(noteLabels.value(n.id), 26) + 22);
+                w = std::max(w, QFontMetricsF(style.font(noteSize, style.noteBold, true))
+                                        .horizontalAdvance(noteLabels.value(n.id)) +
+                                    22 * scale);
             for (const auto &l : e.lyrics)
-                w = std::max(w, textWidth(l.text, 16) + 14);
+                w = std::max(w, textWidth(l.text, lyricSize) + 14);
             if (e.rest && (e.denominator == 0 || e.denominator <= 2))
                 w = std::max(w, std::ceil(restTicks(e) / 480.0) * 26 + 18);
             if (e.denominator <= 2 && !e.rest)
-                w += 35;
-            widths[e.tick] = std::max(widths.value(e.tick), w);
+                w = std::max(w, (e.denominator == 1 ? 80.0 : 50.0) * scale);
+            if (!e.grace)
+                w += afterGraceCounts[e.track].value(e.tick) * 46;
+            widths[timeOf(e)] = std::max(widths.value(timeOf(e)), w);
         }
         MeasureMetrics mm;
-        qreal x = 24;
-        qint64 lastTick = m.tick;
+        qreal x = 16;
+        MusicalTime lastTick(m.tick, 1920);
         qreal lastWidth = 0;
         for (auto it = widths.cbegin(); it != widths.cend(); ++it)
         {
-            x += std::max(lastWidth, 30 * std::sqrt(std::max(0.0, (it.key() - lastTick) / 480.0)));
+            x += std::max(lastWidth,
+                          30 * std::sqrt(std::max(0.0, (it.key() - lastTick).value() * 4)));
             int graceCount = 0;
             for (const auto &voice : voices)
-                graceCount = std::max(graceCount, graceCounts[voice.track].value(it.key()));
+                graceCount = std::max(graceCount, graceCounts[voice.track].value(it.key().ticks()));
             x += graceCount * 46;
             mm.x[it.key()] = x;
             lastTick = it.key();
             lastWidth = it.value();
         }
-        mm.width = std::max(112.0, x + lastWidth + 24);
+        mm.width = std::max(90.0, x + lastWidth + 12 * style.measureGap);
         metrics.push_back(mm);
     }
-    for (const auto &mm : metrics)
-        contentWidth = std::max(contentWidth, mm.width);
-    pageWidth = contentWidth + 2 * Margin;
+    for (const auto &metric : metrics)
+        if (metric.width > contentWidth)
+        {
+            out.warnings << QStringLiteral("小节内容超出可用宽度，请增大纸张或减小字号。");
+            break;
+        }
     newPage(0);
     struct EventPosition
     {
@@ -287,30 +429,64 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
     QVector<System> systems;
     for (int begin = 0; begin < score.measures.size();)
     {
-        if (y + systemHeight > out.pages.last().bottom() - 50)
+        if (y + systemHeight > out.pages.last().bottom() - style.bottomMm * mm)
             newPage(begin);
         int end = begin;
         qreal natural = 0;
         while (end < score.measures.size() &&
-               (end == begin || natural + metrics[end].width <= contentWidth) && end - begin < 4)
+               (end == begin || natural + metrics[end].width <= contentWidth) &&
+               end - begin < style.measuresPerLine)
+        {
+            bool forced = false;
+            if (style.sourceBreaks && end > begin)
+                for (const auto &event : score.measures[end].events)
+                    if (event.sourceBreak)
+                        forced = true;
+            if (forced)
+                break;
             natural += metrics[end++].width;
-        qreal factor = contentWidth / natural;
+        }
+        if (style.sourceBreaks && end - begin >= 3)
+        {
+            int segmentEnd = score.measures.size();
+            for (int i = end; i < score.measures.size(); ++i)
+            {
+                bool forced = false;
+                for (const auto &event : score.measures[i].events)
+                    forced |= event.sourceBreak;
+                if (forced)
+                {
+                    segmentEnd = i;
+                    break;
+                }
+            }
+            if (segmentEnd - end == 1)
+            {
+                --end;
+                natural -= metrics[end].width;
+            }
+        }
+        qreal factor = (end == score.measures.size() && !style.stretchLast)
+                           ? std::min(1.0, contentWidth / natural)
+                           : contentWidth / natural;
         System system{begin, end, y, {}, 24 + Margin, 24 + Margin + contentWidth};
         qreal rowY = y + 28;
         for (const auto &v : voices)
         {
             system.rowTop[v.track] = rowY;
-            text({}, v.name, QRectF(system.right - 200, rowY - 58, 200, 18), 11, v.track);
+            if (style.showVoices && voices.size() > 1)
+                text({}, v.name, QRectF(system.right - 200, rowY - 48, 200, 18), 11, v.track);
             rowY += rowHeights[v.track];
         }
         qreal measureX = system.left;
         const int systemIndex = systems.size();
         for (int mi = begin; mi < end; ++mi)
         {
-            QMap<int, QMap<qint64, int>> graceIndex;
+            QMap<int, QMap<qint64, int>> graceIndex, afterGraceIndex;
             const auto &m = score.measures[mi];
             qreal width = metrics[mi].width * factor;
-            text(m.id, QString::number(m.number), QRectF(measureX, y, 40, 20), 11);
+            if (style.showMeasures)
+                text(m.id, QString::number(m.number), QRectF(measureX, y, 40, 20), 11);
             for (const auto &v : voices)
             {
                 qreal row = system.rowTop[v.track];
@@ -318,6 +494,12 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                 line(m.id, QPointF(measureX, row + 3), QPointF(measureX, bottom), v.track);
                 line(m.id, QPointF(measureX + width, row + 3), QPointF(measureX + width, bottom),
                      v.track);
+                if (m.barline == 32)
+                {
+                    out.items.last().strokeWidth = style.lineWidth * 2.5;
+                    line(m.id, QPointF(measureX + width - 5, row + 3),
+                         QPointF(measureX + width - 5, bottom), v.track);
+                }
                 if (m.repeatStart)
                 {
                     line(m.id, QPointF(measureX + 4, row + 3), QPointF(measureX + 4, bottom),
@@ -338,8 +520,10 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                 if (!system.rowTop.contains(e.track))
                     continue;
                 qreal row = system.rowTop[e.track];
-                qreal x = measureX + metrics[mi].x.value(e.tick, 24) * factor;
-                if (e.grace)
+                qreal x = measureX + metrics[mi].x.value(timeOf(e), 24) * factor;
+                if (e.grace && e.graceAfter)
+                    x += 46 * (++afterGraceIndex[e.track][e.tick]);
+                else if (e.grace)
                     x -= 46 * (graceCounts[e.track].value(e.tick) - graceIndex[e.track][e.tick]++);
                 qreal baseline = row + (maxChord[e.track] - 1) * noteSpacing[e.track];
                 if (e.grace)
@@ -352,7 +536,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                 auto notes = e.notes;
                 std::sort(notes.begin(), notes.end(),
                           [](const auto &a, const auto &b) { return a.midi < b.midi; });
-                if (e.rest)
+                if (e.rest && e.visible)
                 {
                     int count = (e.denominator == 0 || e.denominator <= 2)
                                     ? std::max(1, int(std::ceil(restTicks(e) / 480.0)))
@@ -385,32 +569,43 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                     out.hits.push_back(
                         {e.id, e.id, box.adjusted(-4, -7, 4, 9), e.track, mi, e.tick, false});
                 }
+                if (e.rest && !e.visible)
+                    out.hits.push_back({e.id, e.id, QRectF(x - 15, baseline - 7, 30, 50), e.track,
+                                        mi, e.tick, false});
                 int ni = 0;
-                for (const auto &n : notes)
-                {
-                    qreal ny = baseline - ni++ * noteSpacing[e.track];
-                    QRectF box(x - (e.grace ? 16 : 23), ny, e.grace ? 32 : 46, 34);
-                    text(n.id, noteLabels.value(n.id), box, e.grace ? 17 : 26, e.track, true);
-                    int dots = octaveDots(n, e.keyFifths);
-                    int beamLines = e.denominator >= 8 ? int(std::log2(e.denominator)) - 2 : 0;
-                    for (int d = 0; d < std::abs(dots); ++d)
-                        dot(n.id,
-                            QPointF(x, dots > 0 ? ny - 5 - d * 5 : ny + 40 + beamLines * 4 + d * 5),
-                            e.track);
-                    out.hits.push_back(
-                        {n.id, e.id, box.adjusted(-2, -7, 2, 7), e.track, mi, e.tick, true});
-                    auto np = pos;
-                    np.p.setY(ny);
-                    positions.insert(n.id, np);
-                }
-                int lines = e.denominator >= 8 ? int(std::log2(e.denominator)) - 2 : 0;
-                for (int l = 0; l < lines; ++l)
-                    line(e.id, QPointF(x - 10, baseline + 36 + l * 4),
-                         QPointF(x + 10, baseline + 36 + l * 4), e.track);
-                if (!e.rest || e.denominator >= 4)
+                if (e.visible)
+                    for (const auto &n : notes)
+                    {
+                        qreal ny = baseline - ni++ * noteSpacing[e.track];
+                        qreal fontSize = e.grace ? noteSize * 0.65 : noteSize;
+                        qreal digitWidth =
+                            QFontMetricsF(style.font(fontSize, style.noteBold, true))
+                                .horizontalAdvance(e.rhythm ? QStringLiteral("X")
+                                                            : noteLabels.value(n.id)) +
+                            6;
+                        QRectF box(x - digitWidth / 2, ny, digitWidth,
+                                   std::max(34.0, fontSize * 1.35));
+                        text(n.id, e.rhythm ? QStringLiteral("X") : noteLabels.value(n.id), box,
+                             e.grace ? noteSize * 0.65 : noteSize, e.track, style.noteBold);
+                        out.items.last().fontFamily = style.numberFont;
+                        int dots = e.rhythm ? 0 : octaveDots(n, e.keyFifths);
+                        int beamLines = e.denominator >= 8 ? int(std::log2(e.denominator)) - 2 : 0;
+                        for (int d = 0; d < std::abs(dots); ++d)
+                            dot(n.id,
+                                QPointF(x, dots > 0 ? ny - 5 - d * 5
+                                                    : ny + 40 + beamLines * 4 + d * 5),
+                                e.track);
+                        out.hits.push_back(
+                            {n.id, e.id, box.adjusted(-2, -7, 2, 7), e.track, mi, e.tick, true});
+                        auto np = pos;
+                        np.p.setY(ny);
+                        positions.insert(n.id, np);
+                    }
+
+                if (e.visible && (!e.rest || e.denominator >= 4))
                     for (int d = 0; d < e.dots; ++d)
                         dot(e.id, QPointF(x + 16 + d * 6, baseline + 18), e.track);
-                if (!e.rest && (e.denominator == 1 || e.denominator == 2))
+                if (e.visible && !e.rest && (e.denominator == 1 || e.denominator == 2))
                 {
                     int count = e.denominator == 1 ? 3 : 1;
                     for (int k = 0; k < count; ++k)
@@ -419,19 +614,97 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                 }
                 for (const auto &lyric : e.lyrics)
                 {
-                    qreal ly =
-                        row + maxChord[e.track] * noteSpacing[e.track] + 10 + lyric.verse * 24;
-                    qreal w = std::max(32.0, textWidth(lyric.text, 16) + 6);
+                    qreal ly = row + maxChord[e.track] * noteSpacing[e.track] + style.lyricGap +
+                               lyric.verse * lyricSize * style.verseGap;
+                    qreal w = std::max(32.0, textWidth(lyric.text, lyricSize) + 6);
                     text(e.id, lyric.text + (lyric.extend ? "＿" : ""),
-                         QRectF(x - w / 2, ly, w, 23), 16, e.track);
+                         QRectF(x - w / 2, ly, w, lyricSize * 1.5), lyricSize, e.track,
+                         style.lyricBold);
+                    if (!style.lyricFont.isEmpty())
+                        out.items.last().fontFamily = style.lyricFont;
                 }
             }
             measureX += width;
         }
         systems.push_back(system);
-        y += systemHeight + 24;
+        y += systemHeight + style.systemGap;
         begin = end;
     }
+    for (const auto &measure : score.measures)
+        for (const auto &voice : voices)
+        {
+            QVector<const EventData *> group;
+            auto paintGroup = [&]()
+            {
+                if (group.isEmpty())
+                    return;
+                for (int i = 0; i < group.size(); ++i)
+                {
+                    const auto &event = *group[i];
+                    const auto p = positions.value(event.id).p;
+                    int levels = std::max(0, int(std::log2(std::max(4, event.denominator))) - 2);
+                    for (int level = 0; level < levels; ++level)
+                    {
+                        bool left = i > 0 && group[i - 1]->denominator >= (8 << level);
+                        bool right =
+                            i + 1 < group.size() && group[i + 1]->denominator >= (8 << level);
+                        if (right)
+                            line(event.id, QPointF(p.x(), p.y() + 36 + level * 4),
+                                 QPointF(positions.value(group[i + 1]->id).p.x(),
+                                         p.y() + 36 + level * 4),
+                                 event.track);
+                        else if (!left)
+                        {
+                            double a = -10, b = 10;
+                            if (group.size() > 1 && level > 0)
+                            {
+                                if (i == group.size() - 1)
+                                    b = 0;
+                                else
+                                    a = 0;
+                            }
+                            line(event.id, QPointF(p.x() + a, p.y() + 36 + level * 4),
+                                 QPointF(p.x() + b, p.y() + 36 + level * 4), event.track);
+                        }
+                    }
+                }
+                group.clear();
+            };
+            qint64 beat =
+                (measure.denominator == 8 && measure.numerator >= 6 && measure.numerator % 3 == 0)
+                    ? 720
+                    : 1920 / measure.denominator;
+            QString previousBeam;
+            qint64 previousBeat = -1;
+            bool previousGrace = false, previousAfter = false;
+            MusicalTime lastEnd;
+            for (const auto &event : measure.events)
+            {
+                if (event.track != voice.track)
+                    continue;
+                qint64 bucket = (event.tick - measure.tick) / std::max<qint64>(1, beat);
+                bool joins = !group.isEmpty() && event.grace == previousGrace &&
+                             event.graceAfter == previousAfter &&
+                             (event.grace ||
+                              ((event.position == lastEnd || event.tick == lastEnd.ticks()) &&
+                               ((!event.beamGroup.isEmpty() && event.beamGroup == previousBeam) ||
+                                (event.beamGroup.isEmpty() && previousBeam.isEmpty() &&
+                                 bucket == previousBeat))));
+                if (!joins || event.rest || !event.visible || event.denominator < 8)
+                    paintGroup();
+                if (event.visible && !event.rest && event.denominator >= 8 &&
+                    positions.contains(event.id))
+                    group << &event;
+                previousBeam = event.beamGroup;
+                previousBeat = bucket;
+                previousGrace = event.grace;
+                previousAfter = event.graceAfter;
+                lastEnd = event.length == MusicalTime()
+                              ? MusicalTime(event.tick + event.duration, 1920)
+                              : event.position + event.length;
+            }
+            paintGroup();
+        }
     QVector<QRectF> markLabels;
     for (const auto &mark : score.marks)
     {
@@ -446,8 +719,9 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
             auto end = lastMeasure.tick + lastMeasure.duration;
             if (mark.tick >= start && mark.tick < end)
                 firstSystem = si;
-            if ((mark.kind == "tuplet" || mark.kind == "volta" ? mark.endTick > start
-                                                               : mark.endTick >= start) &&
+            if (((mark.kind == "tuplet" || mark.kind == "volta" || mark.kind == "hairpin")
+                     ? mark.endTick > start
+                     : mark.endTick >= start) &&
                 mark.endTick <= end)
                 lastSystem = si;
         }
@@ -491,9 +765,11 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                 qreal row = sys.rowTop[mark.track];
                 qreal a = si == firstSystem ? pointAt(sys, mark.tick) : sys.left + 5;
                 qreal b = si == lastSystem ? pointAt(sys, mark.endTick) : sys.right - 5;
-                if (si == firstSystem && positions.contains(mark.startId))
+                if (si == firstSystem && positions.contains(mark.startId) &&
+                    positions[mark.startId].system == si)
                     a = positions[mark.startId].p.x();
-                if (si == lastSystem && positions.contains(mark.endId))
+                if (si == lastSystem && positions.contains(mark.endId) &&
+                    positions[mark.endId].system == si)
                     b = positions[mark.endId].p.x();
                 qreal cy = row - (mark.kind == "volta" ? 20 : 5);
                 if (mark.kind == "tie" && positions.contains(mark.startId) &&
@@ -504,7 +780,8 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
                 QPainterPath path;
                 if (mark.kind == "hairpin")
                 {
-                    cy = row + rowHeights[mark.track] - 16;
+                    cy = row + maxChord[mark.track] * noteSpacing[mark.track] + style.lyricGap +
+                         maxVerse[mark.track] * lyricSize * style.verseGap + 46;
                     bool close = mark.text == ">";
                     path.moveTo(a, cy + (close ? -5 : 0));
                     path.lineTo(b, cy + (close ? 0 : -5));
@@ -552,7 +829,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
             qreal my = sys.rowTop[mark.track] - 35;
             if (mark.kind == "dynamic")
                 my = sys.rowTop[mark.track] + maxChord[mark.track] * noteSpacing[mark.track] +
-                     maxVerse[mark.track] * 24 + 16;
+                     style.lyricGap + maxVerse[mark.track] * lyricSize * style.verseGap + 16;
             if (mark.kind == "articulation" || mark.kind == "fermata")
                 my = sys.rowTop[mark.track] - 22;
             QString label = (mark.kind == "key" || mark.kind == "minor-key")
@@ -577,6 +854,9 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &score, const QJsonObject 
             out.hits.push_back({mark.id, {}, box, mark.track, sys.first, mark.tick, false});
         }
     }
+    for (auto &item : out.items)
+        if (item.kind == LayoutItem::Kind::Curve)
+            item.strokeWidth = style.lineWidth;
     out.size = QSizeF(pageWidth + 48, out.pages.last().bottom() + 24);
     return out;
 }

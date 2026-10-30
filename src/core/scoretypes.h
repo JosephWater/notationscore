@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
+#include "musicaltime.h"
 #include <QJsonObject>
+#include <QMap>
 #include <QStringList>
 #include <QVector>
 
@@ -37,6 +39,15 @@ struct EventData
     QVector<NoteData> notes;
     QVector<LyricData> lyrics;
     QStringList articulations;
+    MusicalTime position, length;
+    QString beamGroup;
+    bool visible = true;
+    bool rhythm = false;
+    bool graceAfter = false;
+    bool sourceBreak = false;
+    QString logicalId;
+    int sourceStart = -1;
+    int sourceLength = 0;
 };
 struct VoiceData
 {
@@ -55,6 +66,7 @@ struct MeasureData
     bool repeatStart = false;
     bool repeatEnd = false;
     QVector<EventData> events;
+    int barline = 1;
 };
 struct MarkData
 {
@@ -77,6 +89,9 @@ struct ScoreSnapshot
     QVector<MeasureData> measures;
     QVector<MarkData> marks;
     QStringList warnings;
+    QStringList subtitles;
+    QStringList authors;
+    QMap<int, int> lyricRows;
     int noteCount() const
     {
         int n = 0;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(JianpuLab VERSION 0.2.0 LANGUAGES C CXX)
+project(JianpuLab VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,7 +15,8 @@ qt_standard_project_setup(REQUIRES 6.10)
 add_subdirectory(cmake/engine)
 
 qt_add_library(jianpu_document STATIC src/core/runtime.cpp src/core/runtime.h
-    src/core/scoredocument.cpp src/core/scoredocument.h src/core/scoretypes.h)
+    src/core/scoredocument.cpp src/core/scoredocument_text.cpp src/core/scoredocument.h src/core/scoretypes.h
+    src/input/textformat.cpp src/input/textformat.h src/core/musicaltime.h)
 target_include_directories(jianpu_document PUBLIC src)
 target_link_libraries(jianpu_document PUBLIC Qt6::Widgets PRIVATE jianpu_muse_core)
 if(MSVC)
@@ -36,10 +37,14 @@ endif()
 
 qt_add_executable(jianpu_lab src/main.cpp)
 set_target_properties(jianpu_lab PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE WIN32_EXECUTABLE TRUE)
-qt_add_library(jianpu_editor STATIC src/layout/jianpulayout.cpp src/layout/jianpulayout.h
-    src/ui/scorecanvas.cpp src/ui/scorecanvas.h src/ui/mainwindow.cpp src/ui/mainwindow.h)
+qt_add_library(jianpu_editor STATIC src/layout/jianpulayout.cpp src/layout/jianpulayout.h src/layout/layoutsettings.cpp src/layout/layoutsettings.h
+    src/ui/scorecanvas.cpp src/ui/scorecanvas.h src/ui/mainwindow.cpp src/ui/mainwindow.h
+    src/ui/sourceeditor.cpp src/ui/sourceeditor.h src/ui/layoutpanel.cpp src/ui/layoutpanel.h
+    src/input/inputcontroller.cpp src/input/inputcontroller.h)
 target_include_directories(jianpu_editor PUBLIC src)
 target_link_libraries(jianpu_editor PUBLIC jianpu_document Qt6::Widgets)
+qt_add_resources(jianpu_editor jianpu_fonts PREFIX "/fonts" FILES
+    assets/fonts/NotoSerifCJKsc-Regular.otf assets/fonts/NotoSansCJKsc-Regular.otf assets/fonts/DejaVuSans.ttf)
 target_link_libraries(jianpu_lab PRIVATE jianpu_editor)
 install(TARGETS jianpu_lab RUNTIME DESTINATION bin)
 extdeps_install_consumed()
@@ -63,6 +68,11 @@ endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
+    qt_add_executable(tst_textinput tests/tst_textinput.cpp)
+    set_target_properties(tst_textinput PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    target_link_libraries(tst_textinput PRIVATE jianpu_editor Qt6::Test)
+    add_test(NAME textinput COMMAND tst_textinput)
+    set_tests_properties(textinput PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
     add_test(NAME app_smoke COMMAND jianpu_lab --smoke)
     set_tests_properties(app_smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
     qt_add_executable(tst_editor tests/tst_editor.cpp)

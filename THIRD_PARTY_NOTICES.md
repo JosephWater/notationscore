@@ -14,3 +14,7 @@ JianpuLab is licensed under GPL-3.0-only. MuseScore source files and their origi
 | Embedded music/text fonts | MuseScore/fonts and engraving resource manifests | Original font licenses included under licenses/fonts; font metadata and source remain in corresponding source checkout |
 
 The independent module initializer and format adapter follow upstream production initialization and two-pass import behavior. Compatibility code in cmake/engine is part of JianpuLab and is supplied with its source. No MuseScore branding is used as the application name.
+
+## Editor fonts
+
+The application embeds Noto Serif CJK SC and Noto Sans CJK SC (SIL Open Font License 1.1, from https://github.com/notofonts/noto-cjk) and DejaVu Sans (Bitstream Vera / DejaVu font licenses). Corresponding license texts are distributed in `licenses/NotoCJK` and `licenses/DejaVu`. These fonts are used by the editor and do not change the MuseScore reference checkout.

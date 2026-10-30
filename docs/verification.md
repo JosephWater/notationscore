@@ -1,3 +1,23 @@
+# 键盘打谱与排版验证（0.3）
+
+验证日期：2026-10-30。Ubuntu 26.04、GCC 15.2、Qt 6.10.2；MuseScore 与子模块仍保持固定提交，参考 checkout 未修改。
+
+- Linux Debug 与 Release 均完成构建，六个 CTest 套件通过。新套件 `tst_textinput` 覆盖文字语法、时值、升降号习惯、精确七连音及 MusicXML 往返、跨小节延音、前后倚音、嵌套连奏线、渐变力度、中文注释、歌词绑定、删除歌词保留、双模式键盘和中文输入法提交。
+- 原有格式、编辑、选择、原子保存及 Qt 运行时回归保持通过。新建默认一小节；密集小节续行后保持固定纸张，原测试的页面扩宽预期已相应更新。
+- 工程格式 2 保存 `input.json`，恢复文字稿、未完成结构、绑定与排版；继续读取格式 1。损坏的文字稿关联会在替换文档前拒绝加载。
+- 新文字曲谱导出前显式构建 MIDI 映射，避免内核导出器访问尚未初始化的通道。后倚音使用无斜线的 MusicXML grace 标记及 steal-time-previous，已验证恢复为内核后倚音。
+- 字体统一测量和绘制，中文字体、数字字体及许可随程序内嵌。截图在固定应用字体下生成，三种预设均检查。
+
+产物：`build/linux-release/jianpu_lab`；测试日志 `artifacts/ctest-keyboard-debug.log`、`artifacts/ctest-keyboard-release.log`；界面 `artifacts/keyboard-editor.png`；谱面 `artifacts/keyboard-classic.png`、`artifacts/keyboard-modern.png`、`artifacts/keyboard-children.png`。
+
+示例：`examples/paipaizuo.jptxt` 补齐原始示例的两个缺失音符；`paipaizuo-draft.jptxt` 原样保留用户示例并显示待分配歌词；`keyboard-ensemble.jptxt` 演示编号声部、多段歌词和减时线。
+
+边界：首个适配器覆盖文档列出的番茄式字段与音符语法；嵌套连音组提示未支持。当前无法完整回写的复杂谱面操作或导入内容会启用保护，保留完整内核数据并允许继续谱面编辑，正文文字重建受到限制。过高的声部组需调整字号或纸张。
+
+Windows 构建脚本与 CI 已包含新套件；字体通过 Qt 资源部署。当前环境仍没有 MSVC／Windows Qt SDK，尚未执行 Windows 构建和实机中文输入法验收，不能据 Linux 测试宣称 Windows 已验证。
+
+---
+
 # 首版验证记录
 
 验证日期：2026-10-19。环境为 Ubuntu 26.04、GCC 15.2.0、Qt 6.10.2，使用固定的 MuseScore 与子模块提交。Windows 验证未执行。
@@ -35,6 +55,6 @@ MIDI 首次转换是轨道发现阶段，会忽略轨道筛选。应用在临时
 - 当前环境没有 Windows、MSVC 或 Windows Qt SDK，尚未生成和运行 Windows exe/便携 ZIP。
 - scripts/build-windows.ps1 和 Windows CI 已准备，但未在 Windows 上执行；M1、M4 的 Windows 验收仍未完成。
 - 发布前需在未安装 Qt 和开发工具的 Windows 10/11 x64 上验证启动、中文输入、文件读写及独立运行。脚本的自动冒烟验证不能替代这一步。
-- 复杂总谱的细致排版仍需人工校对；过密小节或过多声部会扩展页面尺寸。首版不包含自由拖动所有排版控制点、五线谱视图或打击乐简谱编辑。
+- 复杂总谱的细致排版仍需人工校对。0.3 已改用固定纸张和密集小节续行；过高声部组提示调整设置。首版不包含自由拖动所有排版控制点、五线谱视图或打击乐简谱编辑。
 
 试听、打印/PDF、安装程序、扫描识谱和音频转谱不在本期范围。

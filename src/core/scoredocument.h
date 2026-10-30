@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
+#include "input/textformat.h"
 #include "scoretypes.h"
 #include <QObject>
 #include <memory>
@@ -30,10 +31,18 @@ class ScoreDocument final : public QObject
     QString error() const { return m_error; }
     QString filePath() const { return m_path; }
     QJsonObject viewSettings() const { return m_view; }
-    void setViewSettings(const QJsonObject &value);
+    void setViewSettings(const QJsonObject &value, const QString &mergeKey = {});
+    bool applyText(const QString &source, const QString &mergeKey = {});
+    QString sourceText() const;
+    QJsonObject inputState() const { return m_input; }
+    void setInputState(const QJsonObject &state);
+    void storeInputDraft(const QString &source, const QString &error);
+    void sealInputGroup() { m_mergeKey.clear(); }
+    QStringList inputMessages() const;
     QByteArray copy(const QStringList &ids) const;
   signals:
     void changed();
+    void loaded();
 
   private:
     std::shared_ptr<mu::engraving::EngravingProject> m_project;
@@ -43,6 +52,24 @@ class ScoreDocument final : public QObject
     QStringList m_warnings;
     QJsonObject m_view;
     QJsonObject m_savedView;
+    QJsonObject m_input;
+    struct HistoryState
+    {
+        std::shared_ptr<mu::engraving::EngravingProject> project;
+        QJsonObject view, input;
+    };
+    struct HistoryEntry
+    {
+        HistoryState before, after;
+        bool engine = false;
+        QString mergeKey;
+    };
+    QVector<HistoryEntry> m_history;
+    QString m_mergeKey;
+    HistoryState historyState() const { return {m_project, m_view, m_input}; }
+    void recordChange(const HistoryState &, bool engine = false, const QString &mergeKey = {});
+    void applyBindings(TextParseResult &parsed) const;
+    void syncSourceAfterEdit(const EditRequest &, const ScoreSnapshot &before);
     bool m_imported = false;
     QVector<quint64> m_states{0};
     int m_cursor = 0;

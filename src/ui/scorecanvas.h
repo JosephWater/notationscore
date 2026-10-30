@@ -24,6 +24,11 @@ class ScoreCanvas final : public QWidget
     void setInputDuration(int denominator, int dots = 0);
     void copy();
     void paste();
+    void setKeyboardInput(bool enabled)
+    {
+        m_keyboardInput = enabled;
+        update();
+    }
     void paintScore(QPainter &painter, const QRectF &exposed) const;
   signals:
     void selectionChanged();
@@ -52,6 +57,7 @@ class ScoreCanvas final : public QWidget
     int m_denominator = 4;
     int m_dots = 0;
     bool m_input = false;
+    bool m_keyboardInput = false;
     bool m_dragging = false;
     QPointF m_dragStart;
     QPointF m_dragEnd;

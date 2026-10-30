@@ -14,6 +14,7 @@ class QCloseEvent;
 namespace jianpu
 {
 class ScoreCanvas;
+class InputController;
 class MainWindow final : public QMainWindow
 {
     Q_OBJECT
@@ -30,6 +31,7 @@ class MainWindow final : public QMainWindow
   private:
     ScoreDocument m_document;
     ScoreCanvas *m_canvas;
+    InputController *m_input = nullptr;
     QListWidget *m_voices;
     QListWidget *m_marks;
     QPlainTextEdit *m_report;

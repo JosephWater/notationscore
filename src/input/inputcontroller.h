@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+#include <QObject>
+#include <QTimer>
+class QDockWidget;
+class QLineEdit;
+class QMainWindow;
+namespace jianpu
+{
+class ScoreDocument;
+class ScoreCanvas;
+class SourceEditor;
+class InputController final : public QObject
+{
+    Q_OBJECT
+  public:
+    InputController(ScoreDocument *, ScoreCanvas *, QMainWindow *);
+    bool flush();
+    SourceEditor *editor() const { return m_editor; }
+    void toggleMode();
+    void sourceSelection();
+  signals:
+    void error(const QString &);
+
+  protected:
+    bool eventFilter(QObject *, QEvent *) override;
+
+  private:
+    ScoreDocument *m_document;
+    ScoreCanvas *m_canvas;
+    SourceEditor *m_editor;
+    QDockWidget *m_dock;
+    QLineEdit *m_inline;
+    QTimer m_timer;
+    bool m_refreshing = false, m_music = false, m_seenQ = false, m_sourceMode = true,
+         m_composing = false;
+    bool m_annotation = false;
+    bool m_globalLyrics = false;
+    int m_lyricVerse = 0;
+    QString m_lyricBase;
+    int m_voice = 1, m_inlineStart = -1;
+    QString m_inlinePrefix, m_lastGood;
+    void refresh();
+    void commit();
+    void command(int key);
+    void appendMusic(const QString &);
+    void editHeader(const QString &field);
+    void startLyrics();
+    void updateInline();
+    int voiceNumber() const;
+};
+} // namespace jianpu

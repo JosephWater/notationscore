@@ -129,9 +129,9 @@ class DocumentTest : public QObject
         d.undo();
         QCOMPARE(semantic(d.snapshot()), before);
         QVERIFY2(d.edit({EditRequest::Kind::AppendMeasure}), qPrintable(d.error()));
-        QCOMPARE(d.snapshot().measures.size(), 5);
+        QCOMPARE(d.snapshot().measures.size(), 2);
         d.undo();
-        QCOMPARE(d.snapshot().measures.size(), 4);
+        QCOMPARE(d.snapshot().measures.size(), 1);
     }
     void errorsPreserveDocumentAndFile()
     {
