@@ -16,7 +16,7 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName("JianpuLab");
     QCoreApplication::setOrganizationName("JianpuLab");
-    QCoreApplication::setApplicationVersion("0.3.0");
+    QCoreApplication::setApplicationVersion(JIANPU_APP_VERSION);
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("C++ 多声部简谱编辑器"));
     parser.addHelpOption();

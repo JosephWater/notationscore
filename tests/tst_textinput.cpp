@@ -9,10 +9,15 @@
 #include "ui/scorecanvas.h"
 #include "ui/sourceeditor.h"
 #include <QComboBox>
+#include <QDockWidget>
 #include <QFile>
+#include <QFontMetricsF>
+#include <QImage>
 #include <QInputMethodEvent>
 #include <QJsonArray>
 #include <QLineEdit>
+#include <QMenu>
+#include <QPainter>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -21,6 +26,359 @@ class TextInputTest : public QObject
 {
     Q_OBJECT
   private slots:
+    void panelsCanBeReopenedFromView()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *menu = w.findChild<QMenu *>("viewMenu");
+        QVERIFY(menu);
+        for (const auto &name : {"voicesDock", "paletteDock", "sourceDock", "propertiesDock",
+                                 "layoutDock", "reportDock"})
+        {
+            auto *dock = w.findChild<QDockWidget *>(name);
+            QVERIFY(dock);
+            auto *toggle = dock->toggleViewAction();
+            QVERIFY(menu->actions().contains(toggle));
+            dock->close();
+            QVERIFY(dock->isHidden());
+            QVERIFY(!toggle->isChecked());
+            toggle->trigger();
+            QVERIFY(!dock->isHidden());
+            QVERIFY(toggle->isChecked());
+            toggle->trigger();
+            QVERIFY(dock->isHidden());
+        }
+    }
+    void lyricsFitAtDifferentDpiAndAlignWithNotes()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        QVERIFY(d.applyText(QStringLiteral("Q: 1/ 2/ 3 4 5 |\nC: 春，夏秋冬雪\nC: 一二三四五\n")));
+        auto layout = JianpuLayout().layout(d.snapshot());
+        int lyricCount = 0;
+        for (const auto &item : layout.items)
+        {
+            if (item.kind != LayoutItem::Kind::Text || item.track < 0 ||
+                qAbs(item.fontSize - LayoutSettings::fromJson({}).lyricPt * 4 / 3) > 0.01)
+                continue;
+            QFont font(item.fontFamily);
+            font.setPixelSize(qRound(item.fontSize));
+            for (int dpi : {96, 144, 192})
+            {
+                QImage image(200, 100, QImage::Format_ARGB32_Premultiplied);
+                image.setDotsPerMeterX(qRound(dpi / 0.0254));
+                image.setDotsPerMeterY(qRound(dpi / 0.0254));
+                QFontMetricsF metrics(font, &image);
+                QVERIFY2(metrics.height() <= item.bounds.height() + 0.01, qPrintable(item.text));
+                image.fill(Qt::white);
+                QPainter painter(&image);
+                painter.setFont(font);
+                painter.drawText(image.rect(), Qt::AlignLeft, item.text);
+                painter.end();
+                bool ink = false;
+                for (int y = 0; y < image.height(); ++y)
+                    for (int x = 0; x < image.width(); ++x)
+                        ink |= image.pixelColor(x, y) != QColor(Qt::white);
+                QVERIFY(ink);
+            }
+            if (item.text == QStringLiteral("春，"))
+            {
+                qreal noteX = -1;
+                for (const auto &hit : layout.hits)
+                    if (hit.eventId == item.id)
+                        noteX = hit.rect.center().x();
+                QVERIFY(noteX > 0);
+                QVERIFY(qAbs(item.bounds.left() +
+                             QFontMetricsF(font).horizontalAdvance(QStringLiteral("春")) / 2 -
+                             noteX) < 0.01);
+            }
+            ++lyricCount;
+        }
+        QCOMPARE(lyricCount, 10);
+    }
+    void referenceHeaderAndBarlineStyle()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        QVERIFY(d.applyText(QStringLiteral("B: 参考版式\nB: 副标题\nZ: 张三 词 / 李四 曲\n"
+                                           "D: G\nP: 4/4\nQ: 1 2 3 4 | 5 6 7 1 ||\n")));
+        auto s = d.snapshot();
+        auto first = s.measures[0].events[0].notes[0].id;
+        QVERIFY(d.edit({EditRequest::Kind::AddMark, {first}, 152, 0, "tempo"}));
+        s = d.snapshot();
+        auto layout = JianpuLayout().layout(s);
+        auto style = LayoutSettings::fromJson({});
+        QVERIFY(!style.noteBold);
+        QVERIFY(!style.showMeasures);
+        QRectF key, author;
+        int tempoLabels = 0;
+        QString tempoId;
+        for (const auto &m : s.marks)
+            if (m.kind == "tempo")
+                tempoId = m.id;
+        QVERIFY(!tempoId.isEmpty());
+        for (const auto &item : layout.items)
+        {
+            if (item.text == "1 = G")
+                key = item.bounds;
+            if (item.text == QStringLiteral("张三 词 / 李四 曲"))
+                author = item.bounds;
+            if (item.id == tempoId && item.kind == LayoutItem::Kind::Text)
+            {
+                ++tempoLabels;
+                QVERIFY(item.bounds.top() < layout.systems[0].bounds.top());
+            }
+            // Normal barlines end measures; there is no extra line before the first note.
+            if (item.id == s.measures[0].id && item.kind == LayoutItem::Kind::Line)
+                QVERIFY(item.bounds.left() > layout.systems[0].bounds.left() + 1);
+        }
+        QVERIFY(!key.isEmpty());
+        QVERIFY(!author.isEmpty());
+        QVERIFY(author.left() > key.right());
+        QVERIFY(qAbs(author.center().y() - key.center().y()) < 0.01);
+        QCOMPARE(tempoLabels, 1);
+        QVERIFY(!layout.hits.first().eventId.isEmpty());
+        QVERIFY(layout.hitTest(layout.items.first().bounds.center()) == nullptr);
+    }
+    void automaticBarsAndLayoutRowsRoundTrip()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        QVERIFY(d.applyText(QStringLiteral(
+            "# 保留\nB: 同步测试\nQ: 1 2 3 4 5 6 7 1 2 3 4 5 6 7 1 2\n"
+            "C: 春夏秋冬山水天地花草树木风雨云雪\nC: 一二三四五六七八九十一二三四五六\n")));
+        auto source = d.sourceText();
+        QCOMPARE(FanqieFormat().parse(source).boundaries.size(), 4);
+        auto view = d.viewSettings();
+        auto style = LayoutSettings::defaults();
+        style["measuresPerLine"] = 2;
+        view["layout"] = style;
+        d.setViewSettings(view);
+        auto twoRows = d.sourceText();
+        QCOMPARE(twoRows.count("Q:"), 2);
+        QCOMPARE(twoRows.count("C:"), 4);
+        auto parsed = FanqieFormat().parse(twoRows);
+        QVERIFY2(!parsed.hasErrors(), qPrintable(parsed.messages().join('\n')));
+        QCOMPARE(parsed.notes.size(), 16);
+        QCOMPARE(parsed.notes[8].lyrics[0], QStringLiteral("花"));
+        QCOMPARE(parsed.notes[8].lyrics[1], QStringLiteral("九"));
+        for (const auto &m : d.snapshot().measures)
+            for (const auto &e : m.events)
+                if (!e.rest)
+                {
+                    auto match =
+                        std::find_if(parsed.notes.begin(), parsed.notes.end(),
+                                     [&](const auto &n) { return n.position == e.position; });
+                    QVERIFY(match != parsed.notes.end());
+                    QCOMPARE(match->midi, e.notes[0].midi);
+                    QCOMPARE(match->lyrics[0], e.lyrics[0].text);
+                }
+        d.undo();
+        QCOMPARE(d.sourceText(), source);
+        d.redo();
+        QCOMPARE(d.sourceText(), twoRows);
+        style["measuresPerLine"] = 4;
+        view["layout"] = style;
+        d.setViewSettings(view);
+        QCOMPARE(d.sourceText().count("Q:"), 1);
+        QTemporaryDir dir;
+        QVERIFY(d.save(dir.filePath("aligned.jianpu")));
+        ScoreDocument reopened;
+        QVERIFY(reopened.open(dir.filePath("aligned.jianpu")));
+        QCOMPARE(reopened.sourceText(), d.sourceText());
+        QCOMPARE(reopened.snapshot().measures[0].events[0].lyrics[0].text, QStringLiteral("春"));
+    }
+    void automaticBarsFollowDurationEdits()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        QVERIFY(d.applyText("Q: 1 2 3 4 5 6 7 1\n"));
+        auto source = d.sourceText();
+        QVERIFY(source.contains('|'));
+        source.replace("1 2 3", "1 2- 3");
+        QVERIFY2(d.applyText(source), qPrintable(d.error()));
+        auto parsed = FanqieFormat().parse(d.sourceText());
+        QVERIFY2(!parsed.hasErrors(), qPrintable(parsed.messages().join('\n')));
+        QCOMPARE(parsed.notes[1].duration, MusicalTime(1, 2));
+        QCOMPARE(d.snapshot().measures.size(), 3);
+        for (const auto &m : d.snapshot().measures)
+            QCOMPARE(m.duration, qint64(1920));
+    }
+    void multiVoiceRowsAndVisualProjection()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        auto view = d.viewSettings();
+        auto style = LayoutSettings::defaults();
+        style["measuresPerLine"] = 1;
+        view["layout"] = style;
+        d.setViewSettings(view);
+        QVERIFY(
+            d.applyText(QStringLiteral("Q1: 1 2 3 4 5 6 7 1\nC1: 春夏秋冬山水天地\n"
+                                       "C1: 一二三四五六七八\nQ2: 5- 6- 7- 1-\nC2: 花草树木\n")));
+        QCOMPARE(d.sourceText().count("Q1:"), 2);
+        QCOMPARE(d.sourceText().count("Q2:"), 2);
+        QCOMPARE(d.sourceText().count("C1:"), 4);
+        QCOMPARE(d.sourceText().count("C2:"), 2);
+        auto p = FanqieFormat().parse(d.sourceText());
+        QVERIFY2(!p.hasErrors(), qPrintable(p.messages().join('\n')));
+        auto s = d.snapshot();
+        auto layout = JianpuLayout().layout(s, d.viewSettings());
+        QMap<qint64, qreal> anchors;
+        for (const auto &hit : layout.hits)
+            if (hit.note)
+            {
+                if (anchors.contains(hit.tick))
+                    QVERIFY(qAbs(anchors[hit.tick] - hit.rect.center().x()) < 0.01);
+                anchors[hit.tick] = hit.rect.center().x();
+            }
+        auto id = s.measures[0].events[0].notes[0].id;
+        QVERIFY(d.edit({EditRequest::Kind::AddChordNote, {id}, 67}));
+        QVERIFY(d.inputState()["protected"].toBool());
+        QCOMPARE(d.sourceText().count("Q1:"), 2);
+        QCOMPARE(d.sourceText().count("Q2:"), 2);
+        QVERIFY(d.sourceText().contains(QStringLiteral("春")));
+        d.undo();
+        QVERIFY(!d.inputState()["protected"].toBool());
+        QCOMPARE(d.snapshot().noteCount(), s.noteCount());
+    }
+    void regularSystemsShareMeasureGrid()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        QVERIFY(d.applyText("Q: " + QString("1 2 3 4 | ").repeated(8) + "\n"));
+        auto s = d.snapshot();
+        auto style = LayoutSettings::defaults("children");
+        auto layout = JianpuLayout().layout(s, {{"layout", style}});
+        QVERIFY(layout.systems.size() >= 2);
+        QMap<int, QVector<qreal>> starts;
+        QSet<QString> seen;
+        for (const auto &hit : layout.hits)
+            if (hit.note && !seen.contains(s.measures[hit.measure].id))
+            {
+                seen.insert(s.measures[hit.measure].id);
+                for (int row = 0; row < layout.systems.size(); ++row)
+                    if (layout.systems[row].start <= MusicalTime(hit.tick, 1920) &&
+                        MusicalTime(hit.tick, 1920) < layout.systems[row].end)
+                        starts[row] << hit.rect.center().x();
+            }
+        for (int row = 1; row < layout.systems.size(); ++row)
+            for (int column = 0; column < std::min(starts[0].size(), starts[row].size()); ++column)
+                QVERIFY(qAbs(starts[0][column] - starts[row][column]) < 0.01);
+    }
+    void continuationTextPreservesTiesAndLyrics()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        QVERIFY(d.applyText(QStringLiteral("Q: 1 2---\nC: 春夏\n")));
+        auto aligned = d.sourceText();
+        QVERIFY(aligned.contains('^'));
+        auto p = FanqieFormat().parse(aligned);
+        QVERIFY2(!p.hasErrors(), qPrintable(p.messages().join('\n')));
+        QVERIFY(p.notes.last().tieBack);
+        QVERIFY(p.notes.last().lyrics.isEmpty());
+        int noteCount = d.snapshot().noteCount();
+        QVERIFY2(d.applyText(aligned + "# round trip\n"), qPrintable(d.error()));
+        QCOMPARE(d.snapshot().noteCount(), noteCount);
+        int lyrics = 0, ties = 0;
+        for (const auto &m : d.snapshot().measures)
+            for (const auto &e : m.events)
+            {
+                lyrics += e.lyrics.size();
+                for (const auto &n : e.notes)
+                    ties += n.tieStart;
+            }
+        QCOMPARE(lyrics, 2);
+        QVERIFY(ties > 0);
+        QVERIFY(FanqieFormat().parse("Q: 1^ 2").hasErrors());
+        QVERIFY(FanqieFormat().parse("Q: 1^").hasErrors());
+        auto view = d.viewSettings();
+        auto style = LayoutSettings::defaults();
+        style["measuresPerLine"] = 1;
+        view["layout"] = style;
+        d.setViewSettings(view);
+        QCOMPARE(d.sourceText().count("Q:"), 2);
+        style["measuresPerLine"] = 4;
+        view["layout"] = style;
+        d.setViewSettings(view);
+        QCOMPARE(d.sourceText().count("Q:"), 1);
+    }
+    void importedTupletProjectionKeepsTiming()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        QVERIFY(d.applyText("Q: (y1/2/3/) 4 5 6 |\n"));
+        QTemporaryDir dir;
+        QVERIFY(d.exportFile(dir.filePath("tuplet.musicxml")));
+        ScoreDocument imported;
+        QVERIFY(imported.open(dir.filePath("tuplet.musicxml")));
+        const auto source = imported.sourceText();
+        const auto p = FanqieFormat().parse(source);
+        QVERIFY2(!p.hasErrors(), qPrintable(p.messages().join('\n')));
+        QCOMPARE(p.notes[1].position, MusicalTime(1, 12));
+        auto s = imported.snapshot();
+        for (const auto &m : s.measures)
+            for (const auto &e : m.events)
+                if (!e.grace)
+                {
+                    QVERIFY(e.sourceStart >= 0);
+                    auto match = std::find_if(p.notes.begin(), p.notes.end(), [&](const auto &n)
+                                              { return n.offset == e.sourceStart; });
+                    QVERIFY(match != p.notes.end());
+                    QCOMPARE(match->position, e.position);
+                    QCOMPARE(match->duration, e.length);
+                }
+    }
+    void keyboardSuffixAfterAutomaticBar()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        w.canvas()->setFocus();
+        QTest::keyClick(w.canvas(), Qt::Key_Q);
+        QTest::keyClicks(w.canvas(), "1234");
+        QTRY_VERIFY(w.document()->sourceText().contains('|'));
+        QTest::keyClick(w.canvas(), Qt::Key_Slash);
+        QTRY_COMPARE(FanqieFormat().parse(w.document()->sourceText()).notes.last().duration,
+                     MusicalTime(1, 8));
+        QVERIFY(!w.document()->inputState()["hasErrors"].toBool());
+        QTest::keyClick(w.canvas(), Qt::Key_F6);
+        QTRY_VERIFY(editor->hasFocus());
+    }
+    void continuousChineseLyricsKeepCaretAtEnd()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText("Q: 1 2 3 4\nC: ");
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 4);
+        editor->moveCursor(QTextCursor::End);
+        editor->setFocus();
+        for (const auto &word : {QStringLiteral("春"), QStringLiteral("夏"), QStringLiteral("秋"),
+                                 QStringLiteral("冬")})
+        {
+            QInputMethodEvent ime;
+            ime.setCommitString(word);
+            QApplication::sendEvent(editor, &ime);
+            QTRY_VERIFY(w.document()->sourceText().contains(word));
+            QVERIFY(!w.document()->inputState()["hasErrors"].toBool());
+            QCOMPARE(editor->textCursor().position(), int(editor->toPlainText().size()));
+        }
+        auto s = w.document()->snapshot();
+        QCOMPARE(s.measures[0].events[0].lyrics[0].text, QStringLiteral("春"));
+        QCOMPARE(s.measures[0].events[3].lyrics[0].text, QStringLiteral("冬"));
+        auto source = w.document()->sourceText();
+        source.replace(QStringLiteral("春 夏 秋 冬"), QStringLiteral("春 @"));
+        QVERIFY(w.document()->applyText(source));
+        QVERIFY(w.document()->sourceText().trimmed().endsWith("@"));
+        QVERIFY(w.document()->applyText(w.document()->sourceText() + QStringLiteral("夏")));
+        s = w.document()->snapshot();
+        QVERIFY(s.measures[0].events[1].lyrics.isEmpty());
+        QCOMPARE(s.measures[0].events[2].lyrics[0].text, QStringLiteral("夏"));
+    }
     void durationsAndSpelling()
     {
         auto p = FanqieFormat().parse("V: 1.0\nD: D\nP: 4/4\nQ: 1/ 2// 3- 4/- 5-. 6/-. 1''# |\n");

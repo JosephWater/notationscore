@@ -44,10 +44,16 @@ struct HitRegion
 };
 struct LayoutResult
 {
+    struct SystemRange
+    {
+        MusicalTime start, end;
+        QRectF bounds;
+    };
     quint64 revision = 0;
     QVector<QRectF> pages;
     QVector<LayoutItem> items;
     QVector<HitRegion> hits;
+    QVector<SystemRange> systems;
     QSizeF size;
     QStringList warnings;
     const HitRegion *hitTest(QPointF point) const;

@@ -34,6 +34,8 @@ struct EventData
     int denominator = 4;
     int dots = 0;
     int tuplet = 0;
+    int tupletNormal = 0;
+    QString tupletGroup;
     bool rest = false;
     bool grace = false;
     QVector<NoteData> notes;

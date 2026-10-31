@@ -11,6 +11,7 @@ class QLabel;
 class QPlainTextEdit;
 class QAction;
 class QCloseEvent;
+class QMenu;
 namespace jianpu
 {
 class ScoreCanvas;
@@ -42,6 +43,7 @@ class MainWindow final : public QMainWindow
     QLabel *m_selectionInfo;
     QAction *m_undo;
     QAction *m_redo;
+    QMenu *m_viewMenu = nullptr;
     bool m_refreshing = false;
     bool m_confirmClose = true;
     void buildMenus();

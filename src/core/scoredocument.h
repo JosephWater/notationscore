@@ -70,6 +70,8 @@ class ScoreDocument final : public QObject
     void recordChange(const HistoryState &, bool engine = false, const QString &mergeKey = {});
     void applyBindings(TextParseResult &parsed) const;
     void syncSourceAfterEdit(const EditRequest &, const ScoreSnapshot &before);
+    void syncSourceLayout();
+    TextParseResult parseText(const QString &) const;
     bool m_imported = false;
     QVector<quint64> m_states{0};
     int m_cursor = 0;

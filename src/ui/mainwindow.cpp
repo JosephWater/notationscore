@@ -77,8 +77,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), m_document(this)
                 layoutDock->raise();
                 layoutDock->widget()->setFocus(Qt::ShortcutFocusReason);
             });
-    auto *viewMenu = menuBar()->actions()[2]->menu();
-    viewMenu->addAction(layoutDock->toggleViewAction());
+    m_viewMenu->addSeparator();
+    for (auto *dock : findChildren<QDockWidget *>())
+    {
+        auto *toggle = dock->toggleViewAction();
+        toggle->setObjectName("toggle_" + dock->objectName());
+        m_viewMenu->addAction(toggle);
+    }
     auto *voiceDock = findChild<QDockWidget *>("voicesDock");
     auto *paletteDock = findChild<QDockWidget *>("paletteDock");
     auto *sourceDock = findChild<QDockWidget *>("sourceDock");
@@ -117,6 +122,8 @@ void MainWindow::buildMenus()
     auto *file = menuBar()->addMenu(tr("文件(&F)"));
     auto *edit = menuBar()->addMenu(tr("编辑(&E)"));
     auto *view = menuBar()->addMenu(tr("视图(&V)"));
+    m_viewMenu = view;
+    view->setObjectName("viewMenu");
     auto *scoreMenu = menuBar()->addMenu(tr("曲谱(&S)"));
     auto *toolbar = addToolBar(tr("文件与编辑"));
     toolbar->setMovable(false);
@@ -311,8 +318,9 @@ void MainWindow::buildMenus()
                     {
                         QMessageBox::about(
                             this, tr("简谱实验室"),
-                            tr("简谱实验室 0.3\nC++20 / Qt 6.10.2\n使用 MuseScore GPLv3 "
-                               "乐谱内核。\n版权与第三方许可见发行目录 licenses。"));
+                            tr("简谱实验室 %1\nC++20 / Qt 6.10.2\n使用 MuseScore GPLv3 "
+                               "乐谱内核。\n版权与第三方许可见发行目录 licenses。")
+                                .arg(JIANPU_APP_VERSION));
                     });
 }
 void MainWindow::buildPanels()
@@ -446,11 +454,12 @@ void MainWindow::buildPanels()
 void MainWindow::refresh()
 {
     m_refreshing = true;
-    setWindowTitle(tr("%1%2 — 简谱实验室")
+    setWindowTitle(tr("%1%2 — 简谱实验室 %3")
                        .arg(m_document.modified() ? "*" : "",
                             m_document.filePath().isEmpty()
                                 ? m_canvas->score().title
-                                : QFileInfo(m_document.filePath()).fileName()));
+                                : QFileInfo(m_document.filePath()).fileName(),
+                            JIANPU_APP_VERSION));
     m_undo->setEnabled(m_document.canUndo());
     m_redo->setEnabled(m_document.canRedo());
     m_voices->clear();
@@ -540,6 +549,9 @@ void MainWindow::selectionChanged()
 }
 void MainWindow::editLyrics()
 {
+    auto *dock = findChild<QDockWidget *>("propertiesDock");
+    dock->show();
+    dock->raise();
     m_lyrics->setFocus();
     m_lyrics->selectAll();
 }

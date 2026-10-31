@@ -39,11 +39,11 @@ try {
         Copy-Item $_.FullName $buildDir -Force
     }
     foreach ($program in @('jianpu_lab', 'jianpu_engine_probe', 'tst_document', 'tst_textinput', 'tst_editor', 'tst_scorewidget', 'tst_qtruntime')) {
-        Invoke-Checked "$env:QT_ROOT/bin/windeployqt.exe" @("--$($Configuration.ToLowerInvariant())", '--compiler-runtime', '--no-translations', "$buildDir/$program.exe")
+        Invoke-Checked "$env:QT_ROOT/bin/windeployqt.exe" @("--$($Configuration.ToLowerInvariant())", '--compiler-runtime', '--no-translations', '--include-plugins', 'qoffscreen', "$buildDir/$program.exe")
     }
     Invoke-Checked 'ctest' @('--preset', $preset)
     Invoke-Checked 'cmake' @('--install', $buildDir, '--prefix', $distDir, '--config', $Configuration)
-    Invoke-Checked "$env:QT_ROOT/bin/windeployqt.exe" @("--$($Configuration.ToLowerInvariant())", '--compiler-runtime', '--no-translations', "$distDir/bin/jianpu_lab.exe")
+    Invoke-Checked "$env:QT_ROOT/bin/windeployqt.exe" @("--$($Configuration.ToLowerInvariant())", '--compiler-runtime', '--no-translations', '--include-plugins', 'qoffscreen', "$distDir/bin/jianpu_lab.exe")
     if ($Configuration -eq 'Release') {
         if (-not $env:VCToolsRedistDir) { throw 'VCToolsRedistDir is required for app-local MSVC runtime deployment.' }
         $crt = Get-ChildItem "$env:VCToolsRedistDir/x64" -Directory -Filter 'Microsoft.VC*.CRT' | Select-Object -First 1

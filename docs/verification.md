@@ -1,3 +1,20 @@
+# 歌词、文字稿同步与歌谱版式（0.3.1）
+
+验证日期：2026-10-31。参考图：工作区 `/home/liyuese/dev/640.png`；只参考版式，不将原图加入发行包。
+
+- 修正屏幕 DPI 改变时谱面字体尺寸与文字框不一致的问题；歌词使用统一的像素字体和实际字体高度，多段歌词独立留出空间，标点悬挂在字的右侧。测试覆盖 96 / 144 / 192 DPI，以及中文逐字提交、行尾光标、连续填词和手工 `@` 跳音。
+- 六个 Dock 面板全部接入“视图”菜单，关闭后可以从菜单重新打开。歌词编辑快捷键会显示并激活属性面板。
+- 自动小节线、谱面换行和歌词行回写到文字稿。自动生成的边界与手工边界分别记录；后续时值改变会重新计算自动边界。回写与触发它的音乐或排版修改共用一次撤销历史，并随工程保存重开。
+- `^` 表示延音连接，跨小节长音拆分后不会多占歌词词位；显式连音比例保持精确时值。原生导入的连音组投影保留比例与分组，已覆盖 MusicXML 导出重开后文字位置与内核位置的对应。
+- 经典出版采用居中黑体标题、居中副标题、左侧调号与分式拍号、右侧署名和页眉初始速度；数字常规字重，隐藏小节号，普通行首不多画小节线。多声部共用时间轴，常规小节等宽，末行延续前行的列宽，歌词与音符字心对齐。
+- 程序与内核日志版本统一为 0.3.1。Windows 部署显式包含 `qoffscreen`，修正测试仅部署 `qwindows` 的问题。
+
+Linux Debug / Release 的六个 CTest 套件通过；日志为 `artifacts/ctest-alignment-debug-final.log`、`artifacts/ctest-alignment-release-final.log`。高 DPI 检查为 `artifacts/alignment-dpi192.log`。三种预设与多声部截图为 `artifacts/aligned-classic.png`、`aligned-modern.png`、`aligned-children.png`、`aligned-multivoice.png`，完整界面为 `artifacts/aligned-editor.png`。示例 `examples/alignment.jptxt` 可用于观察自动小节线、曲行和双段歌词回写。
+
+保留的边界：语法错误、未闭合结构与待分配歌词暂不重排，先保留原稿；无法完整表示的原生对象仍在内核中受保护。当前环境未运行 Windows 构建或实机中文输入法，不以 Linux 的高 DPI 检查代替 Windows 验收。
+
+---
+
 # 键盘打谱与排版验证（0.3）
 
 验证日期：2026-10-30。Ubuntu 26.04、GCC 15.2、Qt 6.10.2；MuseScore 与子模块仍保持固定提交，参考 checkout 未修改。

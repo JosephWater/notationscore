@@ -409,6 +409,7 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
         m_states = {0};
         m_cursor = 0;
         m_savedState = 0;
+        syncSourceLayout();
         notify();
         emit loaded();
         return true;
@@ -1070,6 +1071,7 @@ bool ScoreDocument::edit(const EditRequest &request)
     if (score->undoStack()->currentIndex() != before)
     {
         syncSourceAfterEdit(request, previousSnapshot);
+        syncSourceLayout();
         recordChange(previousState, true);
     }
     notify();
@@ -1218,6 +1220,8 @@ ScoreSnapshot ScoreDocument::snapshot() const
                 event.dots = cr->dots();
                 event.rest = cr->isRest();
                 event.tuplet = cr->tuplet() ? cr->tuplet()->ratio().numerator() : 0;
+                event.tupletNormal = cr->tuplet() ? cr->tuplet()->ratio().denominator() : 0;
+                event.tupletGroup = cr->tuplet() ? idFor(cr->tuplet()) : QString();
                 if (auto *t = cr->tuplet())
                 {
                     auto id = idFor(t);
@@ -1466,6 +1470,7 @@ void ScoreDocument::setViewSettings(const QJsonObject &value, const QString &mer
         return;
     auto previous = historyState();
     m_view = value;
+    syncSourceLayout();
     recordChange(previous, false, mergeKey);
     notify();
 }

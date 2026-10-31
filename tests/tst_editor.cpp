@@ -108,7 +108,8 @@ class EditorTest : public QObject
             if (dot.kind == LayoutItem::Kind::Dot)
             {
                 for (const auto &digit : layout.items)
-                    if (digit.kind == LayoutItem::Kind::Text && digit.bold && digit.track >= 0)
+                    if (digit.kind == LayoutItem::Kind::Text && digit.fontFamily == "DejaVu Sans" &&
+                        digit.track >= 0)
                         QVERIFY2(!dot.bounds.intersects(digit.bounds),
                                  "Octave dot overlaps a chord digit");
             }

@@ -10,6 +10,19 @@ QJsonObject LayoutSettings::defaults(const QString &name)
 {
     LayoutSettings s;
     s.preset = name;
+    if (name == "classic")
+    {
+        s.titleFont = "Noto Sans CJK SC";
+        s.lyricFont = "Noto Sans CJK SC";
+        s.lyricPt = 13;
+        s.noteBold = false;
+        s.showMeasures = false;
+        s.headerGap = 6;
+        s.voiceGap = 4;
+        s.systemGap = 8;
+        s.verseGap = 1.1;
+        s.lyricGap = 6;
+    }
     if (name == "modern")
     {
         s.chineseFont = "Noto Sans CJK SC";
@@ -163,7 +176,9 @@ QFont LayoutSettings::font(double px, bool bold, bool number) const
     }();
     Q_UNUSED(loaded);
     QFont f(number ? numberFont : chineseFont);
-    f.setPointSizeF(px * 0.75);
+    // Layout coordinates are device-independent pixels. Point sizes depend on the
+    // screen DPI and can make glyphs taller than their boxes on Windows.
+    f.setPixelSize(qRound(px));
     f.setBold(bold);
     return f;
 }

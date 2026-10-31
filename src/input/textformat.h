@@ -2,6 +2,7 @@
 #pragma once
 #include "core/scoretypes.h"
 #include <QMap>
+#include <QSet>
 #include <memory>
 
 namespace jianpu
@@ -21,10 +22,11 @@ struct TextNote
     MusicalTime duration{1, 4}, written{1, 4}, position;
     int tuplet = 0, normal = 0, tupletId = -1;
     QVector<TextNote> graces;
-    bool graceAfter = false, sourceBreak = false;
+    bool graceAfter = false, sourceBreak = false, tieForward = false, tieBack = false;
     QStringList dynamics;
     QString annotation;
     QMap<int, QString> lyrics;
+    QSet<int> lyricSkips;
 };
 struct TextSpan
 {
@@ -37,6 +39,7 @@ struct TextBoundary
 {
     int voice = 1, after = 0, type = 1, offset = 0;
     MusicalTime position;
+    bool automatic = false;
 };
 struct TextMeasure
 {
@@ -81,5 +84,8 @@ class FanqieFormat final : public TextFormatAdapter
     QString fromSnapshot(const ScoreSnapshot &, bool *protectedContent = nullptr) const override;
     static QString token(const TextNote &);
     static QStringList lyricTokens(const QString &);
+    // Reflow musical fields only; retain all header fields and comments. Tied
+    // continuations use ^ so measure/system boundaries remain editable text.
+    QString alignedSource(const TextParseResult &, const QVector<MusicalTime> &systemStarts) const;
 };
 } // namespace jianpu

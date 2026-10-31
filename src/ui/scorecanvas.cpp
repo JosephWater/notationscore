@@ -171,7 +171,7 @@ void ScoreCanvas::paintScore(QPainter &p, const QRectF &exposed) const
         case LayoutItem::Kind::Text:
         {
             QFont font(item.fontFamily);
-            font.setPointSizeF(item.fontSize * 0.75);
+            font.setPixelSize(qRound(item.fontSize));
             font.setBold(item.bold);
             p.setFont(font);
             p.drawText(item.bounds, item.alignment, item.text);

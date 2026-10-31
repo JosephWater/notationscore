@@ -24,6 +24,65 @@
 #include <QVBoxLayout>
 namespace jianpu
 {
+namespace
+{
+struct LyricLine
+{
+    int end, voice, segment, verse;
+    QString text;
+};
+QVector<LyricLine> lyricLines(const QString &source)
+{
+    QVector<LyricLine> result;
+    int current = 1, segment = 0, offset = 0;
+    QMap<int, int> segments, verses;
+    for (const auto &line : source.split('\n'))
+    {
+        auto field = QRegularExpression("^\\s*([QC])(\\d*)\\s*[:：]\\s*(.*)$").match(line);
+        if (field.hasMatch())
+        {
+            int voice = field.captured(2).isEmpty() ? current : field.captured(2).toInt();
+            if (field.captured(1) == "Q")
+            {
+                current = voice;
+                segments[voice] = ++segment;
+                verses[voice] = 0;
+            }
+            else
+                result << LyricLine{offset + int(line.size()), voice, segments.value(voice),
+                                    verses[voice]++, field.captured(3)};
+        }
+        offset += line.size() + 1;
+    }
+    return result;
+}
+int lyricEndCursor(const QString &oldSource, const QString &source, const TextParseResult &old,
+                   const TextParseResult &now, int cursor)
+{
+    for (const auto &line : lyricLines(oldSource))
+        if (cursor == line.end)
+        {
+            int last = std::max(0, int(FanqieFormat::lyricTokens(line.text).size()) - 1);
+            const TextNote *target = nullptr;
+            for (const auto &n : old.notes)
+                if (n.voice == line.voice && n.segment == line.segment && n.degree != 0 &&
+                    n.degree != 8 && !n.tieBack)
+                {
+                    target = &n;
+                    if (last-- == 0)
+                        break;
+                }
+            if (target)
+                for (const auto &n : now.notes)
+                    if (n.voice == target->voice && n.position == target->position)
+                        for (const auto &newLine : lyricLines(source))
+                            if (newLine.voice == line.voice && newLine.segment == n.segment &&
+                                newLine.verse == line.verse)
+                                return newLine.end;
+        }
+    return -1;
+}
+} // namespace
 InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *window)
     : QObject(window), m_document(d), m_canvas(c)
 {
@@ -131,6 +190,26 @@ void InputController::refresh()
     {
         m_refreshing = true;
         int pos = m_editor->textCursor().position();
+        // Keep the caret on the same musical token when automatic bars or Q/C
+        // rows are inserted before it. This also keeps suffix entry before |.
+        const auto oldParsed = FanqieFormat().parse(m_editor->toPlainText());
+        const auto newParsed = FanqieFormat().parse(source);
+        int lyricCursor =
+            lyricEndCursor(m_editor->toPlainText(), source, oldParsed, newParsed, pos);
+        if (lyricCursor >= 0)
+            pos = lyricCursor;
+        else
+            for (const auto &old : oldParsed.notes)
+                if (pos >= old.offset && pos <= old.offset + old.length)
+                {
+                    for (const auto &now : newParsed.notes)
+                        if (now.voice == old.voice && now.position == old.position)
+                        {
+                            pos = now.offset + std::min(pos - old.offset, now.length);
+                            break;
+                        }
+                    break;
+                }
         m_editor->setPlainText(source);
         auto c = m_editor->textCursor();
         c.setPosition(std::min(pos, int(source.size())));
@@ -298,7 +377,23 @@ void InputController::appendMusic(const QString &text)
         }
     }
     else
-        source.insert(target + length, text);
+    {
+        int insertAt = target + length;
+        if (!text.isEmpty() && QString("/-.',#$=^[&\"").contains(text[0]))
+        {
+            auto parsed = FanqieFormat().parse(source);
+            for (const auto &note : parsed.notes)
+                if (note.voice == m_voice && note.offset >= target &&
+                    note.offset + note.length <= target + length &&
+                    QRegularExpression("^\\s*\\|?\\s*$")
+                        .match(source.mid(note.offset + note.length,
+                                          target + length - note.offset - note.length))
+                        .hasMatch())
+                    insertAt = note.offset + note.length;
+        }
+        source.insert(insertAt, text);
+        length = insertAt - target;
+    }
     m_refreshing = true;
     m_editor->setPlainText(source);
     auto c = m_editor->textCursor();

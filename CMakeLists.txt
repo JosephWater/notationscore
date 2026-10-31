@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(JianpuLab VERSION 0.3.0 LANGUAGES C CXX)
+project(JianpuLab VERSION 0.3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,8 +16,11 @@ add_subdirectory(cmake/engine)
 
 qt_add_library(jianpu_document STATIC src/core/runtime.cpp src/core/runtime.h
     src/core/scoredocument.cpp src/core/scoredocument_text.cpp src/core/scoredocument.h src/core/scoretypes.h
-    src/input/textformat.cpp src/input/textformat.h src/core/musicaltime.h)
+    src/input/textformat.cpp src/input/textformat.h src/input/textreflow.cpp src/core/musicaltime.h
+    src/core/scoredocument_layout.cpp
+    src/layout/jianpulayout.cpp src/layout/jianpulayout.h src/layout/layoutsettings.cpp src/layout/layoutsettings.h)
 target_include_directories(jianpu_document PUBLIC src)
+target_compile_definitions(jianpu_document PUBLIC JIANPU_APP_VERSION="${PROJECT_VERSION}")
 target_link_libraries(jianpu_document PUBLIC Qt6::Widgets PRIVATE jianpu_muse_core)
 if(MSVC)
     target_compile_options(jianpu_document PUBLIC /utf-8 /bigobj)
@@ -37,13 +40,13 @@ endif()
 
 qt_add_executable(jianpu_lab src/main.cpp)
 set_target_properties(jianpu_lab PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE WIN32_EXECUTABLE TRUE)
-qt_add_library(jianpu_editor STATIC src/layout/jianpulayout.cpp src/layout/jianpulayout.h src/layout/layoutsettings.cpp src/layout/layoutsettings.h
+qt_add_library(jianpu_editor STATIC
     src/ui/scorecanvas.cpp src/ui/scorecanvas.h src/ui/mainwindow.cpp src/ui/mainwindow.h
     src/ui/sourceeditor.cpp src/ui/sourceeditor.h src/ui/layoutpanel.cpp src/ui/layoutpanel.h
     src/input/inputcontroller.cpp src/input/inputcontroller.h)
 target_include_directories(jianpu_editor PUBLIC src)
 target_link_libraries(jianpu_editor PUBLIC jianpu_document Qt6::Widgets)
-qt_add_resources(jianpu_editor jianpu_fonts PREFIX "/fonts" FILES
+qt_add_resources(jianpu_document jianpu_fonts PREFIX "/fonts" FILES
     assets/fonts/NotoSerifCJKsc-Regular.otf assets/fonts/NotoSansCJKsc-Regular.otf assets/fonts/DejaVuSans.ttf)
 target_link_libraries(jianpu_lab PRIVATE jianpu_editor)
 install(TARGETS jianpu_lab RUNTIME DESTINATION bin)

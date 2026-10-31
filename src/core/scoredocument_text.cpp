@@ -10,6 +10,7 @@
 #include "engraving/infrastructure/mscwriter.h"
 #include "global/internal/baseapplication.h"
 #include "global/io/buffer.h"
+#include "layout/jianpulayout.h"
 #include "scoredocument.h"
 #include <QFile>
 #include <QJsonArray>
@@ -20,6 +21,28 @@
 
 namespace jianpu
 {
+TextParseResult ScoreDocument::parseText(const QString &source) const
+{
+    auto habits = m_view.value("inputHabits").toObject();
+    auto old = m_input["source"].toString();
+    int prefix = 0, suffix = 0;
+    while (prefix < std::min(old.size(), source.size()) && old[prefix] == source[prefix])
+        ++prefix;
+    while (suffix < std::min(old.size(), source.size()) - prefix &&
+           old[old.size() - 1 - suffix] == source[source.size() - 1 - suffix])
+        ++suffix;
+    QJsonArray offsets;
+    for (auto value : m_input.value("automaticBarOffsets").toArray())
+    {
+        int p = value.toInt();
+        if (p < prefix)
+            offsets << p;
+        else if (p >= old.size() - suffix)
+            offsets << p + source.size() - old.size();
+    }
+    habits["automaticBarOffsets"] = offsets;
+    return FanqieFormat().parse(source, habits);
+}
 namespace
 {
 QStringList lyricLines(const QString &source)
@@ -46,7 +69,13 @@ QString ScoreDocument::sourceText() const
         return m_input["draftSource"].toString();
     if (m_input.contains("source"))
         return m_input["source"].toString();
-    auto projection = FanqieFormat().fromSnapshot(snapshot());
+    auto score = snapshot();
+    auto format = FanqieFormat();
+    auto projection = format.fromSnapshot(score);
+    QVector<MusicalTime> starts;
+    for (const auto &system : JianpuLayout().layout(score, m_view).systems)
+        starts << system.start;
+    projection = format.alignedSource(format.parse(projection), starts);
     projection +=
         QStringLiteral("# 原生乐谱的乐器定义和扩展对象受保护，请在谱面中继续编辑音乐正文。\n");
     return projection;
@@ -140,6 +169,8 @@ void ScoreDocument::applyBindings(TextParseResult &parsed) const
         if (!found.isEmpty())
         {
             note.id = found["id"].toString();
+            if (m_input.value("autoBreakIds").toArray().contains(note.id))
+                note.sourceBreak = false;
             used.insert(note.id);
         }
         if (preserveLyrics && !bindings.isEmpty())
@@ -178,7 +209,7 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey)
         m_input.value("habits").toObject() == m_view.value("inputHabits").toObject())
         return true;
     const auto previous = historyState();
-    auto parsed = FanqieFormat().parse(source, m_view.value("inputHabits").toObject());
+    auto parsed = parseText(source);
     if (parsed.fatal)
         return fail(parsed.messages().join("\n"));
     bool protectedContent = m_input.value("protected").toBool();
@@ -290,6 +321,11 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey)
                                    {"track", tracks.value(parsed.notes[span.first].voice)},
                                    {"tick", parsed.notes[span.first].position.ticks()}};
     m_input["habits"] = m_view.value("inputHabits").toObject();
+    QJsonArray automaticBars;
+    for (const auto &b : parsed.boundaries)
+        if (b.automatic)
+            automaticBars << b.offset;
+    m_input["automaticBarOffsets"] = automaticBars;
     m_input["format"] = "fanqie-1.0";
     m_input["source"] = source;
     m_input["bindings"] = bindings;
@@ -304,6 +340,7 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey)
         messages << tr("已删除音符的歌词待分配：%1").arg(parsed.pendingLyrics.join(" "));
         m_input["messages"] = messages;
     }
+    syncSourceLayout();
     recordChange(previous, false, mergeKey);
     notify();
     return true;
@@ -328,7 +365,7 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
         return;
     }
     auto source = m_input["source"].toString();
-    auto parsed = FanqieFormat().parse(source, m_view.value("inputHabits").toObject());
+    auto parsed = parseText(source);
     struct Replacement
     {
         int start, length;
@@ -628,7 +665,7 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
         source.replace(r.start, r.length, r.text);
     if (!replacements.isEmpty())
     {
-        auto updated = FanqieFormat().parse(source, m_view.value("inputHabits").toObject());
+        auto updated = parseText(source);
         applyBindings(updated);
         QJsonArray bindings;
         auto oldBindings = m_input["bindings"].toArray();
@@ -643,6 +680,11 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
             bindings << binding(n, track);
         }
         m_input["source"] = source;
+        QJsonArray automaticBars;
+        for (const auto &b : updated.boundaries)
+            if (b.automatic)
+                automaticBars << b.offset;
+        m_input["automaticBarOffsets"] = automaticBars;
         m_input["bindings"] = bindings;
         if (request.kind == K::Duration && first)
             for (const auto &boundary : parsed.boundaries)
