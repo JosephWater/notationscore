@@ -112,13 +112,14 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
                                     const QVector<MusicalTime> &systemStarts) const
 {
     // Incomplete structures and surplus lyrics must remain verbatim and editable.
-    if (p.hasErrors() || p.fatal || p.notes.isEmpty())
+    if (!p.canProject() || p.notes.isEmpty())
         return p.source;
     struct Row
     {
         QString music;
         QVector<TextNote> notes;
         int verses = 0;
+        QMap<int, QStringList> trailing;
     };
     using Key = QPair<int, int>; // system, voice: same reading order as the page
     QMap<Key, Row> rows;
@@ -196,6 +197,10 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
             changed |= original != rebuilt;
             for (const auto &key : segmentRows.value(seg))
                 rows[key].verses = std::max(rows[key].verses, verse + 1);
+            for (const auto &overflow : p.overflow)
+                if (overflow.voice == selected && overflow.segment == seg &&
+                    overflow.verse == verse && !segmentRows.value(seg).isEmpty())
+                    rows[segmentRows[seg].last()].trailing[verse] += overflow.words;
             offset += line.size() + 1;
             continue;
         }
@@ -260,7 +265,15 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
             append(rows[previous].music, raw(previousEnd, offset + line.size() - previousEnd));
         else
         {
-            Key key{systemStarts.isEmpty() ? 0 : int(systemStarts.size()) - 1, voice};
+            bool voiceHasNotes = std::any_of(p.notes.begin(), p.notes.end(),
+                                             [&](const auto &n) { return n.voice == voice; });
+            if (voiceHasNotes)
+            {
+                changed = true;
+                offset += line.size() + 1;
+                continue;
+            }
+            Key key{0, voice};
             rows[key].music += field.captured(3);
             segmentRows[segment] << key;
         }
@@ -292,6 +305,8 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
                         keep = words.size();
                 }
             words = words.mid(0, keep);
+            for (const auto &word : it->trailing.value(verse))
+                words << wordToken(word);
             output << "C" + lyricSuffix + ": " + words.join(" ");
         }
     }

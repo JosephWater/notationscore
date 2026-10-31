@@ -60,6 +60,7 @@
 #include "importexport/musicxml/internal/import/importmusicxmllogger.h"
 #include "importexport/musicxml/internal/import/importmusicxmlpass1.h"
 #include "importexport/musicxml/internal/import/importmusicxmlpass2.h"
+#include "presentation/scoreprojection.h"
 #include <QBuffer>
 #include <QFile>
 #include <QFileInfo>
@@ -100,7 +101,10 @@ bool atomicWrite(const QString &path, const QByteArray &bytes, QString &error)
     return true;
 }
 } // namespace
-ScoreDocument::ScoreDocument(QObject *parent) : QObject(parent) {}
+ScoreDocument::ScoreDocument(QObject *parent)
+    : QObject(parent), m_projection(std::make_unique<ScoreProjection>())
+{
+}
 ScoreDocument::~ScoreDocument() = default;
 bool ScoreDocument::fail(const QString &message)
 {
@@ -110,6 +114,7 @@ bool ScoreDocument::fail(const QString &message)
 void ScoreDocument::notify()
 {
     ++m_revision;
+    refreshPresentation();
     m_error.clear();
     emit changed();
 }
@@ -1192,6 +1197,7 @@ QByteArray ScoreDocument::copy(const QStringList &ids) const
 ScoreSnapshot ScoreDocument::snapshot() const
 {
     ScoreSnapshot result;
+    result.textBacked = m_input.contains("source") && !m_input.value("protected").toBool();
     result.revision = m_revision;
     result.warnings = m_warnings;
     if (!m_project)

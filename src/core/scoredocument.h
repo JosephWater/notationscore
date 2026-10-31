@@ -3,6 +3,7 @@
 #include "input/textformat.h"
 #include "scoretypes.h"
 #include <QObject>
+#include <QPointF>
 #include <memory>
 namespace mu::engraving
 {
@@ -10,6 +11,8 @@ class EngravingProject;
 }
 namespace jianpu
 {
+class ScoreProjection;
+struct LayoutResult;
 class ScoreDocument final : public QObject
 {
     Q_OBJECT
@@ -28,6 +31,8 @@ class ScoreDocument final : public QObject
     bool canRedo() const;
     bool modified() const;
     ScoreSnapshot snapshot() const;
+    const LayoutResult &presentation() const;
+    bool moveElement(const QString &id, QPointF delta, const QString &mergeKey = {});
     QString error() const { return m_error; }
     QString filePath() const { return m_path; }
     QJsonObject viewSettings() const { return m_view; }
@@ -35,9 +40,11 @@ class ScoreDocument final : public QObject
     bool applyText(const QString &source, const QString &mergeKey = {},
                    const SourceChanges &changes = {});
     QString sourceText() const;
+    TextParseResult textSnapshot() const;
+    TextParseResult analyzeText(const QString &, const SourceChanges &changes = {}) const;
     QJsonObject inputState() const { return m_input; }
     void setInputState(const QJsonObject &state);
-    void storeInputDraft(const QString &source, const QString &error);
+    void storeInputDraft(const QString &source, const QString &error, const QString &mergeKey = {});
     void sealInputGroup() { m_mergeKey.clear(); }
     QStringList inputMessages() const;
     QByteArray copy(const QStringList &ids) const;
@@ -51,6 +58,8 @@ class ScoreDocument final : public QObject
     QString m_path;
     QString m_error;
     QStringList m_warnings;
+    std::unique_ptr<ScoreProjection> m_projection;
+    std::unique_ptr<LayoutResult> m_presentation;
     QJsonObject m_view;
     QJsonObject m_savedView;
     QJsonObject m_input;
@@ -72,6 +81,8 @@ class ScoreDocument final : public QObject
     void applyBindings(TextParseResult &parsed, const SourceChanges &changes = {}) const;
     void syncSourceAfterEdit(const EditRequest &, const ScoreSnapshot &before);
     void syncSourceLayout();
+    bool syncSourceLayoutPass();
+    void refreshPresentation();
     TextParseResult parseText(const QString &, const SourceChanges &changes = {}) const;
     bool m_imported = false;
     QVector<quint64> m_states{0};

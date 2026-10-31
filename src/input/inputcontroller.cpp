@@ -93,8 +93,8 @@ InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *
     auto *panel = new QWidget;
     auto *layout = new QVBoxLayout(panel);
     layout->setContentsMargins(8, 8, 8, 8);
-    auto *hint =
-        new QLabel(tr("F6 切换输入模式 · Esc 返回命令\nCtrl+空格 补全字段 · 修改后自动更新谱面"));
+    auto *hint = new QLabel(tr(
+        "点击文字稿编辑文字；点击谱面编辑音符\nInsert 切换插入／修改；End 末尾追加；Esc 返回命令"));
     hint->setWordWrap(true);
     layout->addWidget(hint);
     m_context = new QLabel(tr("C1 的 1 表示声部；同一曲行的多个 C1 依次为第 1、2… 段歌词。"));
@@ -147,11 +147,9 @@ InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *
             {
                 m_timer.stop();
                 m_sourceChanges = {};
-                m_music = false;
                 m_seenQ = false;
                 m_voice = 1;
                 m_inline->hide();
-                m_sourceMode = m_document->inputState().value("sourceMode").toBool(true);
                 refresh();
                 auto cursor = m_editor->textCursor();
                 cursor.setPosition(std::clamp(m_document->inputState().value("cursor").toInt(), 0,
@@ -166,9 +164,9 @@ InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *
                 for (const auto &measure : m_canvas->score().measures)
                     for (const auto &event : measure.events)
                     {
-                        bool selected = m_canvas->selection().contains(event.id);
+                        bool selected = m_canvas->modelSelection().contains(event.id);
                         for (const auto &n : event.notes)
-                            selected |= m_canvas->selection().contains(n.id);
+                            selected |= m_canvas->modelSelection().contains(n.id);
                         if (selected && event.sourceStart >= 0)
                         {
                             m_refreshing = true;
@@ -184,23 +182,25 @@ InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *
                         }
                     }
             });
+    connect(m_canvas, &ScoreCanvas::editHeaderRequested, this, &InputController::editHeader);
     connect(m_inline, &QLineEdit::textEdited, this, [this] { updateInline(); });
     connect(m_inline, &QLineEdit::returnPressed, this,
             [this]
             {
                 flush();
                 m_inline->hide();
-                m_music = m_annotation;
                 m_annotation = false;
                 m_canvas->setFocus();
             });
-    auto *action = new QAction(tr("切换文字／谱面输入"), this);
-    action->setObjectName("toggleInputMode");
-    action->setShortcut(QKeySequence(Qt::Key_F6));
-    window->addAction(action);
-    connect(action, &QAction::triggered, this, &InputController::toggleMode);
-    auto *undo = new QAction(this);
-    Q_UNUSED(undo);
+    connect(m_canvas->entryController(), &ScoreEntryController::sourceCursorChanged, this,
+            [this](int position)
+            {
+                QScopedValueRollback<bool> guard(m_refreshing, true);
+                auto cursor = m_editor->textCursor();
+                cursor.setPosition(std::clamp(position, 0, int(m_editor->toPlainText().size())));
+                m_editor->setTextCursor(cursor);
+                m_editor->ensureCursorVisible();
+            });
     refresh();
 }
 void InputController::refresh()
@@ -238,7 +238,6 @@ void InputController::refresh()
         m_editor->setTextCursor(c);
         m_refreshing = false;
     }
-    m_lastGood = source;
     auto parsed =
         FanqieFormat().parse(source, m_document->viewSettings().value("inputHabits").toObject());
     QVector<QPair<int, int>> ranges;
@@ -246,8 +245,6 @@ void InputController::refresh()
         if (d.blocking)
             ranges << qMakePair(d.offset, d.length);
     m_editor->showDiagnostics(ranges);
-    if (m_music && !m_sourceMode)
-        sourceSelection();
 }
 void InputController::commit()
 {
@@ -269,8 +266,7 @@ void InputController::commit()
         auto parsed = FanqieFormat().parse(source);
         int cursor = m_editor->textCursor().position();
         for (const auto &n : parsed.notes)
-            if ((!m_sourceMode && m_music && n.voice == m_voice) ||
-                (cursor > n.offset && cursor <= n.offset + n.length))
+            if (cursor > n.offset && cursor <= n.offset + n.length)
                 mergeKey = QString("note:%1:%2").arg(n.voice).arg(n.offset);
     }
     m_refreshing = true;
@@ -287,10 +283,10 @@ void InputController::commit()
         emit error(message);
         return;
     }
-    m_lastGood = source;
     refresh();
-    m_canvas->setKeyboardInput(m_music);
-    sourceSelection();
+    m_canvas->setKeyboardInput(m_canvas->hasFocus());
+    if (m_editor->hasFocus())
+        sourceSelection();
 }
 bool InputController::flush()
 {
@@ -299,28 +295,6 @@ bool InputController::flush()
     m_timer.stop();
     commit();
     return m_editor->toPlainText() == m_document->sourceText();
-}
-void InputController::toggleMode()
-{
-    flush();
-    m_sourceMode = !m_sourceMode;
-    m_document->sealInputGroup();
-    m_dock->show();
-    m_dock->raise();
-    if (m_sourceMode)
-    {
-        m_editor->setFocus();
-        m_music = false;
-    }
-    else
-    {
-        m_music = true;
-        m_canvas->setFocus();
-    }
-    m_canvas->setKeyboardInput(m_music);
-    auto state = m_document->inputState();
-    state["sourceMode"] = m_sourceMode;
-    m_document->setInputState(state);
 }
 int InputController::voiceNumber() const
 {
@@ -364,6 +338,8 @@ void InputController::sourceSelection()
     auto state = m_document->inputState();
     state["cursor"] = pos;
     m_document->setInputState(state);
+    if (!m_editor->hasFocus())
+        return;
     QScopedValueRollback<bool> selectingFromSource(m_refreshing, true);
     for (const auto &m : m_canvas->score().measures)
         for (const auto &e : m.events)
@@ -386,86 +362,11 @@ void InputController::sourceSelection()
 }
 void InputController::appendMusic(const QString &text)
 {
-    if (!text.isEmpty() && text[0].isDigit())
-        flush();
-    auto source = m_editor->toPlainText();
-    const auto previousSource = source;
-    int editPosition = -1, removed = 0;
-    QRegularExpression field("^\\s*Q(\\d*)\\s*[:：]");
-    int offset = 0, target = -1, length = 0, current = 1;
-    for (const auto &line : source.split('\n'))
-    {
-        auto match = field.match(line);
-        if (match.hasMatch())
-        {
-            if (!match.captured(1).isEmpty())
-                current = match.captured(1).toInt();
-            if (current == m_voice)
-            {
-                target = offset;
-                length = line.size();
-            }
-        }
-        offset += line.size() + 1;
-    }
-    if (target < 0)
-    {
-        source += QString("\nQ%1: ").arg(m_voice);
-        target = source.lastIndexOf('\n') + 1;
-        length = source.size() - target;
-    }
+    flush();
     if (text == "\b")
-    {
-        if (length > 0)
-        {
-            auto line = source.mid(target, length);
-            auto match = field.match(line);
-            if (length > match.capturedLength())
-            {
-                editPosition = target + length - 1;
-                removed = 1;
-                source.remove(target + length - 1, 1);
-            }
-        }
-    }
+        m_canvas->entryController()->backspace();
     else
-    {
-        int insertAt = target + length;
-        if (!text.isEmpty() && QString("/-.',#$=^[&\"").contains(text[0]))
-        {
-            auto parsed = FanqieFormat().parse(source);
-            for (const auto &note : parsed.notes)
-                if (note.voice == m_voice && note.offset >= target &&
-                    note.offset + note.length <= target + length &&
-                    QRegularExpression("^\\s*\\|?\\s*$")
-                        .match(source.mid(note.offset + note.length,
-                                          target + length - note.offset - note.length))
-                        .hasMatch())
-                    insertAt = note.offset + note.length;
-        }
-        source.insert(insertAt, text);
-        editPosition = insertAt;
-        length = insertAt - target;
-    }
-    if (source != previousSource)
-    {
-        if (m_sourceChanges.edits.isEmpty())
-            m_sourceChanges.before = m_document->sourceText();
-        // A newly created Q field and its first note are one append operation.
-        if (source.size() - previousSource.size() != int(text.size()) - removed)
-            m_sourceChanges.edits << SourceChange{int(previousSource.size()), 0,
-                                                  int(source.size() - previousSource.size())};
-        else if (editPosition >= 0)
-            m_sourceChanges.edits << SourceChange{editPosition, removed,
-                                                  removed ? 0 : int(text.size())};
-    }
-    m_refreshing = true;
-    m_editor->setPlainText(source);
-    auto c = m_editor->textCursor();
-    c.setPosition(std::min(int(source.size()), target + length + int(text.size())));
-    m_editor->setTextCursor(c);
-    m_refreshing = false;
-    m_timer.start();
+        m_canvas->entryController()->input(text);
 }
 void InputController::startLyrics()
 {
@@ -489,7 +390,6 @@ void InputController::startLyrics()
     flush();
     m_inline->show();
     m_inline->setFocus();
-    m_music = false;
     m_canvas->setKeyboardInput(false);
 }
 void InputController::updateInline()
@@ -691,7 +591,7 @@ void InputController::editHeader(const QString &field)
 }
 void InputController::command(int key)
 {
-    m_sourceMode = false;
+    m_canvas->entryController()->focus(InputSurface::Score);
     m_voice = voiceNumber();
     if (key == Qt::Key_B)
         editHeader("B");
@@ -720,26 +620,45 @@ void InputController::command(int key)
             commit();
         }
         m_seenQ = true;
-        m_music = true;
         auto voices = m_canvas->score().voices;
         auto ids = FanqieFormat().parse(m_document->sourceText()).voiceNames.keys();
         int index = ids.indexOf(m_voice);
         if (index >= 0 && index < voices.size())
             m_canvas->setActiveTrack(voices[index].track);
+        m_canvas->selectAppendPosition(m_canvas->activeTrack());
+        m_canvas->entryController()->selectTarget(true);
         m_canvas->setFocus();
     }
-    m_canvas->setKeyboardInput(m_music);
+    m_canvas->setKeyboardInput(m_canvas->hasFocus());
 }
 bool InputController::eventFilter(QObject *obj, QEvent *event)
 {
-    if (obj == m_canvas && event->type() == QEvent::MouseButtonPress &&
-        static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton)
+    if (event->type() == QEvent::FocusIn)
+    {
+        if (obj == m_editor)
+        {
+            m_canvas->entryController()->focus(InputSurface::Text);
+            m_canvas->setKeyboardInput(false);
+        }
+        else if (obj == m_canvas)
+        {
+            flush();
+            bool fromText = m_canvas->entryController()->surface() == InputSurface::Text;
+            m_canvas->entryController()->focus(InputSurface::Score);
+            if (m_canvas->selection().isEmpty())
+            {
+                m_canvas->selectAppendPosition(m_canvas->activeTrack());
+                m_canvas->entryController()->selectTarget(true);
+            }
+            else if (fromText)
+                m_canvas->entryController()->selectTarget(m_canvas->atAppendPosition());
+            m_canvas->setKeyboardInput(true);
+        }
+    }
+    if (obj == m_canvas && event->type() == QEvent::MouseButtonPress)
     {
         flush();
-        m_music = false;
-        m_sourceMode = false;
         m_document->sealInputGroup();
-        m_canvas->setKeyboardInput(false);
     }
     if ((obj == m_editor || obj == m_inline) && event->type() == QEvent::InputMethod)
     {
@@ -782,7 +701,6 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         if (e->key() == Qt::Key_Escape && !m_composing)
         {
             flush();
-            m_music = false;
             m_canvas->setFocus();
             return true;
         }
@@ -794,7 +712,6 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         {
             flush();
             m_inline->hide();
-            m_music = false;
             m_canvas->setFocus();
             return true;
         }
@@ -803,10 +720,9 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
     if (e->key() == Qt::Key_Escape)
     {
         flush();
-        m_music = false;
         m_document->sealInputGroup();
         m_canvas->setKeyboardInput(false);
-        return true;
+        return false;
     }
     if (e->modifiers() & Qt::ControlModifier)
     {
@@ -833,36 +749,11 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         return false;
     if (e->key() == Qt::Key_N)
         return true;
-    if (e->key() == Qt::Key_End)
+    if (!e->text().isEmpty() && e->text()[0].isLetter() &&
+        m_canvas->entryController()->wantsLiteralLetters())
     {
-        flush();
-        m_music = true;
-        m_sourceMode = false;
-        m_voice = voiceNumber();
-        m_canvas->setKeyboardInput(true);
+        appendMusic(e->text());
         return true;
-    }
-    if (m_music && !e->text().isEmpty() && e->text()[0].isLetter())
-    {
-        auto source = m_editor->toPlainText();
-        QString last;
-        int voice = 1;
-        for (const auto &line : source.split('\n'))
-        {
-            auto q = QRegularExpression("^\\s*Q(\\d*)\\s*[:：]\\s*(.*)$").match(line);
-            if (q.hasMatch())
-            {
-                if (!q.captured(1).isEmpty())
-                    voice = q.captured(1).toInt();
-                if (voice == m_voice)
-                    last = q.captured(2);
-            }
-        }
-        if (QRegularExpression("&[A-Za-z]*$").match(last).hasMatch())
-        {
-            appendMusic(e->text());
-            return true;
-        }
     }
     if (e->key() == Qt::Key_B || e->key() == Qt::Key_Z || e->key() == Qt::Key_D ||
         e->key() == Qt::Key_P || e->key() == Qt::Key_Q || e->key() == Qt::Key_C)
@@ -870,7 +761,7 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         command(e->key());
         return true;
     }
-    if (m_music && e->text() == "\"")
+    if (e->text() == "\"")
     {
         appendMusic("\"\"");
         flush();
@@ -883,16 +774,6 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         m_inline->setPlaceholderText(tr("音符上方注释；Enter 完成"));
         m_inline->show();
         m_inline->setFocus();
-        return true;
-    }
-    if (m_music && e->key() == Qt::Key_Backspace)
-    {
-        appendMusic("\b");
-        return true;
-    }
-    if (m_music && !e->text().isEmpty() && e->text()[0].isPrint())
-    {
-        appendMusic(e->text());
         return true;
     }
     return false;

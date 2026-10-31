@@ -1,3 +1,20 @@
+# 同步编辑与元素调整（0.4.0）
+
+本轮完成文字稿、输入、布局投影和图形元素的职责拆分，依赖关系见 [架构说明](architecture.md)。
+
+- 长曲行按谱面系统时间范围拆为 Q/C，歌词多出或连线未闭合不再阻止自动小节线和换行。96 音符、双段歌词、超出歌词和超过第一谱行的插入均覆盖；歌词按原音符绑定，空音符不挪走原词。
+- 移除 F6，点击／焦点决定编辑位置。中间音符默认为修改，末尾空格为追加，工具栏与 Insert 可选择插入。方向键导航；Alt+上下修改音高；原有 Ctrl+上下声部切换保留。
+- 退格跨自动小节线和多条 Q 行时一次删除一个输入音符。测试连续从 48 音符删除至空白并检查撤销；手工反复线保留且不阻挡删除。
+- 复合输入覆盖三连音、力度、渐变力度及自动小节线后的后倚音。未完成倚音暂存草稿，完成后提交；中间输入倚音不会删除后续音符和歌词。
+- 记号横向按实际音符锚点居中，垂直空间只在所属系统、声部内预留，不再使用全局横向推挤。标题、作者、调号、拍号、歌词、符号与跨行图形共用 VisualElement 交互。拖动一次提交，方向键可微调，支持撤销、保存与重开；组合拍号整组移动。
+- 原生导入投影补齐缺失声部在弱起／静默小节中的占时隐藏休止符，整小节休止符使用准确时值。记号偏移在原生音高编辑后保留。当前语法无法表达的导入对象仍受保护，保留内核原始内容。
+
+Linux Qt 6.10.2 的 Release 与 Debug 各 7 个 CTest 套件通过；日志为 `artifacts/ctest-sync-release-v040.log`、`artifacts/ctest-sync-debug-v040.log`。新增 `tst_projection` 的 15 个行为场景通过；高 DPI 检查为 `artifacts/projection-dpi192-v040.log`。三种预设截图为 `artifacts/synchronized-editing-v040.png`、`synchronized-modern-v040.png`、`synchronized-children-v040.png`；界面截图为 `artifacts/synchronized-editor-v040.png`，示例为 `examples/synchronized-editing.jptxt`。
+
+未在 Windows / MSVC 或真实 Windows 输入法环境运行本轮代码；`build-windows.ps1` 已加入新套件的 Qt 运行库部署，Windows 用户应运行更新脚本完成当地构建与测试。
+
+---
+
 # 小节对齐、覆盖输入与歌词绑定（0.3.2）
 
 验证日期：2026-10-31。

@@ -26,17 +26,46 @@ QStringList TextParseResult::messages() const
         r << QStringLiteral("第 %1 行，第 %2 列：%3").arg(d.line).arg(d.column).arg(d.message);
     return r;
 }
+bool TextParseResult::canProject() const
+{
+    return !fatal &&
+           std::none_of(diagnostics.begin(), diagnostics.end(), [](const auto &d)
+                        { return d.blocking && d.category == InputDiagnostic::Category::Syntax; });
+}
+QJsonArray TextParseResult::overflowJson() const
+{
+    QJsonArray result;
+    for (const auto &entry : overflow)
+        result << QJsonObject{{"voice", entry.voice},
+                              {"segment", entry.segment},
+                              {"verse", entry.verse},
+                              {"words", QJsonArray::fromStringList(entry.words)}};
+    return result;
+}
+void TextParseResult::restoreOverflow(const QJsonArray &value)
+{
+    overflow.clear();
+    for (auto v : value)
+    {
+        auto o = v.toObject();
+        Overflow entry{o["voice"].toInt(1), o["segment"].toInt(), o["verse"].toInt(), {}};
+        for (auto word : o["words"].toArray())
+            entry.words << word.toString();
+        overflow << entry;
+    }
+}
 std::unique_ptr<TextFormatAdapter> TextFormatAdapter::create(const QString &id)
 {
     return id == "fanqie-1.0" ? std::make_unique<FanqieFormat>() : nullptr;
 }
 namespace
 {
-void diagnostic(TextParseResult &r, int p, const QString &msg, bool blocking = true)
+void diagnostic(TextParseResult &r, int p, const QString &msg, bool blocking = true,
+                InputDiagnostic::Category category = InputDiagnostic::Category::Syntax)
 {
     auto prefix = r.source.left(p);
     int line = prefix.count('\n') + 1, start = prefix.lastIndexOf('\n');
-    r.diagnostics.push_back({p, 1, line, p - start, msg, blocking});
+    r.diagnostics.push_back({p, 1, line, p - start, msg, blocking, category});
 }
 int keyAlter(int step, int fifths)
 {
@@ -179,7 +208,8 @@ struct Reader
                     }
                 }
                 if (p == text.size())
-                    diagnostic(r, base + opening, QStringLiteral("倚音缺少 ]"));
+                    diagnostic(r, base + opening, QStringLiteral("倚音缺少 ]"), true,
+                               InputDiagnostic::Category::Incomplete);
                 else
                     ++p;
             }
@@ -202,7 +232,8 @@ struct Reader
                 }
                 n.annotation = value;
                 if (!closed)
-                    diagnostic(r, base + opening, QStringLiteral("注释缺少结束引号"));
+                    diagnostic(r, base + opening, QStringLiteral("注释缺少结束引号"), true,
+                               InputDiagnostic::Category::Incomplete);
             }
             else if (text[p] == '&')
             {
@@ -568,11 +599,15 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
                 if (wi < words.size())
                 {
                     auto pending = words.mid(wi).join("");
+                    p.r.overflow << TextParseResult::Overflow{
+                        voice, targets.isEmpty() ? p.segment : p.r.notes[targets.first()].segment,
+                        verse, words.mid(wi)};
                     p.r.pendingLyrics << pending;
                     diagnostic(p.r, start,
                                QStringLiteral("%1 个歌词词位待分配：%2")
                                    .arg(words.size() - wi)
-                                   .arg(pending));
+                                   .arg(pending),
+                               true, InputDiagnostic::Category::LyricsOverflow);
                 }
             }
             else
@@ -584,7 +619,8 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
                        QStringLiteral("%1尚未结束")
                            .arg(p.r.spans[index].kind == "slur"     ? "连奏线"
                                 : p.r.spans[index].kind == "tuplet" ? "连音组"
-                                                                    : "渐强／渐弱"));
+                                                                    : "渐强／渐弱"),
+                       true, InputDiagnostic::Category::Incomplete);
         QMap<int, MusicalTime> time;
         for (auto &n : p.r.notes)
         {
@@ -688,7 +724,8 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
         }
         for (auto *n : previous)
             if (n->tieForward)
-                diagnostic(p.r, n->offset, QStringLiteral("延音连接 ^ 后还需要一个音符"));
+                diagnostic(p.r, n->offset, QStringLiteral("延音连接 ^ 后还需要一个音符"), true,
+                           InputDiagnostic::Category::Incomplete);
         return p.r;
     }
     catch (const std::overflow_error &)
@@ -1127,6 +1164,29 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
     out += QString("P: %1/%2\n")
                .arg(s.measures.isEmpty() ? 4 : s.measures[0].numerator)
                .arg(s.measures.isEmpty() ? 4 : s.measures[0].denominator);
+    auto appendGap = [&](MusicalTime gap)
+    {
+        // A voice may have no event in a pickup or a silent measure. Keep its
+        // absolute timeline rather than shifting its following music to tick 0.
+        int guard = 0;
+        while (gap > MusicalTime() && ++guard <= 4096)
+        {
+            int denominator = 1;
+            while (denominator <= 1024 && MusicalTime(1, denominator) > gap)
+                denominator *= 2;
+            if (denominator > 1024)
+            {
+                protect = true;
+                break;
+            }
+            TextNote rest;
+            rest.degree = 8;
+            rest.slashes = std::max(0, int(std::log2(denominator)) - 2);
+            rest.extensions = denominator < 4 ? 4 / denominator - 1 : 0;
+            out += token(rest) + " ";
+            gap = gap - MusicalTime(1, denominator);
+        }
+    };
     int number = 0;
     for (const auto &v : s.voices)
     {
@@ -1147,6 +1207,7 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                         verseCount = std::max(verseCount, l.verse + 1);
         for (const auto &m : s.measures)
         {
+            MusicalTime cursor(m.tick, 1920);
             for (const auto &e : m.events)
                 if (e.track == v.track)
                 {
@@ -1155,6 +1216,19 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                         protect = true;
                     if (e.grace)
                         continue;
+                    auto position =
+                        e.length == MusicalTime() ? MusicalTime(e.tick, 1920) : e.position;
+                    if (position > cursor)
+                    {
+                        if (!activeTuplet.isEmpty())
+                        {
+                            out += ") ";
+                            activeTuplet.clear();
+                        }
+                        appendGap(position - cursor);
+                    }
+                    cursor = position +
+                             (e.length == MusicalTime() ? MusicalTime(e.duration, 1920) : e.length);
                     if (activeTuplet != e.tupletGroup)
                     {
                         if (!activeTuplet.isEmpty())
@@ -1183,6 +1257,22 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                         n.extensions = e.denominator == 0 ? std::max(0, int(e.duration / 480) - 1)
                                                           : 4 / std::max(1, e.denominator) - 1;
                     n.dots = e.dots;
+                    if (e.denominator == 0)
+                    {
+                        auto length = cursor - position;
+                        bool exact = false;
+                        for (int denominator = 1; denominator <= 1024 && !exact; denominator *= 2)
+                            for (int dots = 0; dots <= 3; ++dots)
+                                if (length == MusicalTime((1LL << (dots + 1)) - 1,
+                                                          denominator * (1LL << dots)))
+                                {
+                                    n.slashes = std::max(0, int(std::log2(denominator)) - 2);
+                                    n.extensions = denominator < 4 ? 4 / denominator - 1 : 0;
+                                    n.dots = dots;
+                                    exact = true;
+                                    break;
+                                }
+                    }
                     out += token(n) + " ";
                     if (!e.rest && !n.tieBack)
                     {
@@ -1199,6 +1289,16 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                         }
                     }
                 }
+            auto end = MusicalTime(m.tick + m.duration, 1920);
+            if (cursor < end)
+            {
+                if (!activeTuplet.isEmpty())
+                {
+                    out += ") ";
+                    activeTuplet.clear();
+                }
+                appendGap(end - cursor);
+            }
             out += (m.repeatEnd ? ":|" : m.barline == 32 ? "||" : "|") + QString(" ");
         }
         if (!activeTuplet.isEmpty())

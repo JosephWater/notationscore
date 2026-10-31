@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(JianpuLab VERSION 0.3.2 LANGUAGES C CXX)
+project(JianpuLab VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,15 +14,25 @@ qt_standard_project_setup(REQUIRES 6.10)
 
 add_subdirectory(cmake/engine)
 
+qt_add_library(jianpu_notation STATIC src/input/textformat.cpp src/input/textformat.h
+    src/input/textreflow.cpp src/core/musicaltime.h src/core/scoretypes.h)
+target_include_directories(jianpu_notation PUBLIC src)
+target_link_libraries(jianpu_notation PUBLIC Qt6::Core)
+qt_add_library(jianpu_presentation STATIC src/layout/jianpulayout.cpp src/layout/jianpulayout.h
+    src/layout/scorelayout.h src/layout/visualelement.h src/layout/visualelement.cpp
+    src/layout/markplacement.h src/layout/markplacement.cpp
+    src/layout/layoutsettings.cpp src/layout/layoutsettings.h
+    src/presentation/scoreprojection.cpp src/presentation/scoreprojection.h)
+target_include_directories(jianpu_presentation PUBLIC src)
+target_link_libraries(jianpu_presentation PUBLIC jianpu_notation Qt6::Gui)
 qt_add_library(jianpu_document STATIC src/core/runtime.cpp src/core/runtime.h
-    src/core/scoredocument.cpp src/core/scoredocument_text.cpp src/core/scoredocument.h src/core/scoretypes.h
-    src/input/textformat.cpp src/input/textformat.h src/input/textreflow.cpp src/core/musicaltime.h
-    src/core/scoredocument_layout.cpp
-    src/layout/jianpulayout.cpp src/layout/jianpulayout.h src/layout/layoutsettings.cpp src/layout/layoutsettings.h)
+    src/core/scoredocument.cpp src/core/scoredocument_text.cpp src/core/scoredocument_layout.cpp
+    src/core/scoredocument.h)
 target_include_directories(jianpu_document PUBLIC src)
 target_compile_definitions(jianpu_document PUBLIC JIANPU_APP_VERSION="${PROJECT_VERSION}")
-target_link_libraries(jianpu_document PUBLIC Qt6::Widgets PRIVATE jianpu_muse_core)
+target_link_libraries(jianpu_document PUBLIC jianpu_presentation Qt6::Widgets PRIVATE jianpu_muse_core)
 if(MSVC)
+    target_compile_options(jianpu_notation PUBLIC /utf-8 /bigobj)
     target_compile_options(jianpu_document PUBLIC /utf-8 /bigobj)
 endif()
 qt_add_executable(jianpu_engine_probe tools/engineprobe.cpp)
@@ -43,10 +53,12 @@ set_target_properties(jianpu_lab PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE WI
 qt_add_library(jianpu_editor STATIC
     src/ui/scorecanvas.cpp src/ui/scorecanvas.h src/ui/mainwindow.cpp src/ui/mainwindow.h
     src/ui/sourceeditor.cpp src/ui/sourceeditor.h src/ui/layoutpanel.cpp src/ui/layoutpanel.h
-    src/input/inputcontroller.cpp src/input/inputcontroller.h)
+    src/input/inputcontroller.cpp src/input/inputcontroller.h
+    src/input/scoreentrycontroller.cpp src/input/scoreentrycontroller.h
+    src/input/musictextediting.cpp src/input/musictextediting.h src/input/entrysession.h)
 target_include_directories(jianpu_editor PUBLIC src)
 target_link_libraries(jianpu_editor PUBLIC jianpu_document Qt6::Widgets)
-qt_add_resources(jianpu_document jianpu_fonts PREFIX "/fonts" FILES
+qt_add_resources(jianpu_presentation jianpu_fonts PREFIX "/fonts" FILES
     assets/fonts/NotoSerifCJKsc-Regular.otf assets/fonts/NotoSansCJKsc-Regular.otf assets/fonts/DejaVuSans.ttf)
 target_link_libraries(jianpu_lab PRIVATE jianpu_editor)
 install(TARGETS jianpu_lab RUNTIME DESTINATION bin)
@@ -71,6 +83,12 @@ endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
+    qt_add_executable(tst_projection tests/tst_projection.cpp)
+    set_target_properties(tst_projection PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    target_link_libraries(tst_projection PRIVATE jianpu_editor Qt6::Test)
+    target_compile_definitions(tst_projection PRIVATE RHYTHM_SCORE="${CMAKE_CURRENT_SOURCE_DIR}/examples/rhythm.musicxml")
+    add_test(NAME projection COMMAND tst_projection)
+    set_tests_properties(projection PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
     qt_add_executable(tst_textinput tests/tst_textinput.cpp)
     set_target_properties(tst_textinput PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
     target_link_libraries(tst_textinput PRIVATE jianpu_editor Qt6::Test)

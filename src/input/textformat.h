@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "core/scoretypes.h"
+#include <QJsonArray>
 #include <QMap>
 #include <QSet>
 #include <memory>
@@ -18,9 +19,17 @@ struct SourceChanges
 };
 struct InputDiagnostic
 {
+    enum class Category
+    {
+        Syntax,
+        Incomplete,
+        LyricsOverflow,
+        UnassignedLyrics
+    };
     int offset = 0, length = 1, line = 1, column = 1;
     QString message;
     bool blocking = true;
+    Category category = Category::Syntax;
 };
 struct TextNote
 {
@@ -58,6 +67,11 @@ struct TextMeasure
 };
 struct TextParseResult
 {
+    struct Overflow
+    {
+        int voice = 1, segment = 0, verse = 0;
+        QStringList words;
+    };
     QString source, title = QStringLiteral("未命名曲谱");
     QStringList subtitles, authors;
     int fifths = 0, numerator = 4, denominator = 4;
@@ -71,7 +85,11 @@ struct TextParseResult
     QMap<int, QString> voiceNames;
     QMap<int, int> verseRows;
     QStringList pendingLyrics;
+    QVector<Overflow> overflow;
     bool hasErrors() const;
+    bool canProject() const;
+    QJsonArray overflowJson() const;
+    void restoreOverflow(const QJsonArray &);
     QStringList messages() const;
 };
 class TextFormatAdapter
@@ -82,6 +100,7 @@ class TextFormatAdapter
     virtual TextParseResult parse(const QString &, const QJsonObject &habits = {}) const = 0;
     virtual QByteArray musicXml(const TextParseResult &) const = 0;
     virtual QString fromSnapshot(const ScoreSnapshot &, bool *protectedContent = nullptr) const = 0;
+    virtual QString alignedSource(const TextParseResult &, const QVector<MusicalTime> &) const = 0;
     static std::unique_ptr<TextFormatAdapter> create(const QString &id = "fanqie-1.0");
 };
 class FanqieFormat final : public TextFormatAdapter
@@ -95,6 +114,7 @@ class FanqieFormat final : public TextFormatAdapter
     static QStringList lyricTokens(const QString &);
     // Reflow musical fields only; retain all header fields and comments. Tied
     // continuations use ^ so measure/system boundaries remain editable text.
-    QString alignedSource(const TextParseResult &, const QVector<MusicalTime> &systemStarts) const;
+    QString alignedSource(const TextParseResult &,
+                          const QVector<MusicalTime> &systemStarts) const override;
 };
 } // namespace jianpu

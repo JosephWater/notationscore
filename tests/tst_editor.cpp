@@ -36,7 +36,7 @@ class EditorTest : public QObject
         auto first = canvas.layoutResult().hits.first();
         QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, first.rect.center().toPoint());
         QCOMPARE(canvas.selection(), QStringList{first.id});
-        QTest::keyClick(&canvas, Qt::Key_Up);
+        QTest::keyClick(&canvas, Qt::Key_Up, Qt::AltModifier);
         QCOMPARE(d.snapshot().measures[0].events[0].notes[0].midi, 62);
         QTest::keySequence(&canvas, QKeySequence::Undo);
         QCOMPARE(d.snapshot().measures[0].events[0].notes[0].midi, 60);
@@ -69,7 +69,7 @@ class EditorTest : public QObject
         QCOMPARE(d.snapshot().noteCount(), 1);
         QVERIFY(!canvas.selection().isEmpty());
         QTest::keyClick(&canvas, Qt::Key_Left);
-        QTest::keyClick(&canvas, Qt::Key_Up);
+        QTest::keyClick(&canvas, Qt::Key_Up, Qt::AltModifier);
         QCOMPARE(d.snapshot().measures[0].events[0].notes[0].midi, 62);
     }
     void chineseLyricsInput()

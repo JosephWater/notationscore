@@ -84,6 +84,7 @@ struct MarkData
 struct ScoreSnapshot
 {
     quint64 revision = 0;
+    bool textBacked = false; // Source bindings describe the written extent of each voice.
     QString title;
     int keyFifths = 0;
     bool minor = false;

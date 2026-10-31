@@ -11,6 +11,7 @@
 #include "global/internal/baseapplication.h"
 #include "global/io/buffer.h"
 #include "layout/jianpulayout.h"
+#include "presentation/scoreprojection.h"
 #include "scoredocument.h"
 #include <QFile>
 #include <QJsonArray>
@@ -83,19 +84,22 @@ QString ScoreDocument::sourceText() const
 {
     if (m_input.contains("draftSource"))
         return m_input["draftSource"].toString();
-    if (m_input.contains("source"))
-        return m_input["source"].toString();
+    if (m_input.value("source").isString())
+        return m_input.value("source").toString();
     auto score = snapshot();
-    auto format = FanqieFormat();
+    const auto &format = m_projection->format();
     auto projection = format.fromSnapshot(score);
-    QVector<MusicalTime> starts;
-    for (const auto &system : JianpuLayout().layout(score, m_view).systems)
-        starts << system.start;
-    projection = format.alignedSource(format.parse(projection), starts);
+    projection = m_projection->align(format.parse(projection), m_projection->layout(score, m_view));
     projection +=
         QStringLiteral("# 原生乐谱的乐器定义和扩展对象受保护，请在谱面中继续编辑音乐正文。\n");
     return projection;
 }
+TextParseResult ScoreDocument::analyzeText(const QString &source,
+                                           const SourceChanges &changes) const
+{
+    return parseText(source, changes);
+}
+TextParseResult ScoreDocument::textSnapshot() const { return parseText(sourceText()); }
 QStringList ScoreDocument::inputMessages() const
 {
     QStringList out;
@@ -108,7 +112,8 @@ void ScoreDocument::setInputState(const QJsonObject &state)
     // Cursor/focus are session state, not musical edits. Preferences belong to viewSettings.
     m_input = state;
 }
-void ScoreDocument::storeInputDraft(const QString &source, const QString &error)
+void ScoreDocument::storeInputDraft(const QString &source, const QString &error,
+                                    const QString &mergeKey)
 {
     if (m_input.value("draftSource").toString() == source)
         return;
@@ -116,7 +121,7 @@ void ScoreDocument::storeInputDraft(const QString &source, const QString &error)
     m_input["draftSource"] = source;
     m_input["hasErrors"] = true;
     m_input["messages"] = QJsonArray{error};
-    recordChange(before);
+    recordChange(before, false, mergeKey);
     notify();
 }
 void ScoreDocument::applyBindings(TextParseResult &parsed, const SourceChanges &changes) const
@@ -135,8 +140,29 @@ void ScoreDocument::applyBindings(TextParseResult &parsed, const SourceChanges &
     int delta = parsed.source.size() - oldSource.size();
     const bool exact = changes.before == oldSource && !changes.edits.isEmpty();
     bool preserveLyrics = lyricLines(oldSource) == lyricLines(parsed.source);
+    struct OverflowOwner
+    {
+        TextParseResult::Overflow value;
+        QString anchor;
+    };
+    QVector<OverflowOwner> overflowOwners;
     if (preserveLyrics && !bindings.isEmpty())
     {
+        auto oldParsed = parseText(oldSource);
+        for (const auto &overflow : oldParsed.overflow)
+        {
+            QString anchor;
+            for (const auto &n : oldParsed.notes)
+                if (n.voice == overflow.voice && n.segment == overflow.segment)
+                    for (auto value : bindings)
+                    {
+                        auto b = value.toObject();
+                        if (b["offset"].toInt() == n.offset)
+                            anchor = b["id"].toString();
+                    }
+            overflowOwners << OverflowOwner{overflow, anchor};
+        }
+        parsed.overflow.clear();
         parsed.pendingLyrics.clear();
         for (auto v : m_input.value("pendingLyrics").toArray())
             parsed.pendingLyrics << v.toString();
@@ -237,9 +263,17 @@ void ScoreDocument::applyBindings(TextParseResult &parsed, const SourceChanges &
                     if (!word.toString().isEmpty())
                         parsed.pendingLyrics << word.toString();
         }
+    for (auto owner : overflowOwners)
+    {
+        for (const auto &n : parsed.notes)
+            if (n.id == owner.anchor)
+                owner.value.segment = n.segment;
+        parsed.overflow << owner.value;
+    }
     if (preserveLyrics && !parsed.pendingLyrics.isEmpty())
-        parsed.diagnostics.push_back(
-            {0, 1, 1, 1, tr("歌词待分配：%1").arg(parsed.pendingLyrics.join(" ")), true});
+        parsed.diagnostics.push_back({0, 1, 1, 1,
+                                      tr("歌词待分配：%1").arg(parsed.pendingLyrics.join(" ")),
+                                      true, InputDiagnostic::Category::UnassignedLyrics});
 }
 bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
                               const SourceChanges &changes)
@@ -374,6 +408,7 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
     m_input["messages"] = QJsonArray::fromStringList(parsed.messages());
     m_input["pendingSpans"] = pending;
     m_input["pendingLyrics"] = QJsonArray::fromStringList(parsed.pendingLyrics);
+    m_input["overflow"] = parsed.overflowJson();
     if (!parsed.pendingLyrics.isEmpty() && !parsed.hasErrors())
     {
         auto messages = m_input["messages"].toArray();
@@ -423,6 +458,7 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
             bindings << binding(n, after.voices.value(n.voice - 1).track);
         m_input["source"] = projection;
         m_input["bindings"] = bindings;
+        m_input["overflow"] = projected.overflowJson();
         m_input["protected"] = protectedContent;
         return;
     }
@@ -738,6 +774,7 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
                 automaticBars << b.offset;
         m_input["automaticBarOffsets"] = automaticBars;
         m_input["bindings"] = bindings;
+        m_input["overflow"] = updated.overflowJson();
         if (request.kind == K::Duration && first)
             for (const auto &boundary : parsed.boundaries)
                 if (boundary.position > first->position &&

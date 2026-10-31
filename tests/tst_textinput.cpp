@@ -105,7 +105,8 @@ class TextInputTest : public QObject
         w.canvas()->setZoom(0.65);
         // Start in append mode, then click the middle: the click must override that mode.
         editor->setFocus();
-        QTest::keyClick(editor, Qt::Key_F6);
+        w.canvas()->setFocus();
+        QTest::keyClick(w.canvas(), Qt::Key_End);
         const auto s = w.document()->snapshot();
         auto id = s.measures[0].events[1].notes[0].id;
         QPointF point;
@@ -465,7 +466,8 @@ class TextInputTest : public QObject
         QVERIFY(qAbs(author.center().y() - key.center().y()) < 0.01);
         QCOMPARE(tempoLabels, 1);
         QVERIFY(!layout.hits.first().eventId.isEmpty());
-        QVERIFY(layout.hitTest(layout.items.first().bounds.center()) == nullptr);
+        QVERIFY(layout.hitTest(layout.items.first().bounds.center()) != nullptr);
+        QCOMPARE(layout.hitTest(layout.items.first().bounds.center())->id, QString("@title:0"));
     }
     void automaticBarsAndLayoutRowsRoundTrip()
     {
@@ -670,7 +672,7 @@ class TextInputTest : public QObject
         QTRY_COMPARE(FanqieFormat().parse(w.document()->sourceText()).notes.last().duration,
                      MusicalTime(1, 8));
         QVERIFY(!w.document()->inputState()["hasErrors"].toBool());
-        QTest::keyClick(w.canvas(), Qt::Key_F6);
+        editor->setFocus();
         QTRY_VERIFY(editor->hasFocus());
     }
     void continuousChineseLyricsKeepCaretAtEnd()
@@ -929,10 +931,12 @@ class TextInputTest : public QObject
         source.replace("1 2 3", "1 3");
         QVERIFY(d.applyText(source));
         QVERIFY(d.inputState()["pendingLyrics"].toArray().contains(QStringLiteral("夏")));
+        source = d.sourceText();
         source.replace(QStringLiteral("原题"), QStringLiteral("改题"));
         QVERIFY(d.applyText(source));
         QVERIFY(d.inputState()["pendingLyrics"].toArray().contains(QStringLiteral("夏")));
-        source.replace(QStringLiteral("春夏秋"), QStringLiteral("春秋"));
+        source = d.sourceText();
+        source.replace(QStringLiteral("春 秋"), QStringLiteral("春~秋"));
         QVERIFY(d.applyText(source));
         QVERIFY(d.inputState()["pendingLyrics"].toArray().isEmpty());
     }
@@ -1070,7 +1074,7 @@ class TextInputTest : public QObject
         QApplication::sendEvent(input, &commit);
         QTRY_VERIFY(w.document()->sourceText().contains(QStringLiteral("C2: 中")));
         QTest::keyClick(input, Qt::Key_Escape);
-        QTest::keyClick(w.canvas(), Qt::Key_F6);
+        editor->setFocus();
         QTRY_VERIFY(editor->hasFocus());
     }
     void keyboardLyricsStartAtScoreBeginning()

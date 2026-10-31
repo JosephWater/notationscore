@@ -1,19 +1,51 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "layout/jianpulayout.h"
+#include "layout/visualelement.h"
+#include "presentation/scoreprojection.h"
 #include "scoredocument.h"
 #include <QJsonArray>
 #include <algorithm>
 
 namespace jianpu
 {
+const LayoutResult &ScoreDocument::presentation() const
+{
+    static const LayoutResult empty;
+    return m_presentation ? *m_presentation : empty;
+}
+void ScoreDocument::refreshPresentation()
+{
+    m_presentation = std::make_unique<LayoutResult>(m_projection->layout(snapshot(), m_view));
+}
+bool ScoreDocument::moveElement(const QString &id, QPointF delta, const QString &mergeKey)
+{
+    auto element = presentation().elements.value(id);
+    if (!element || !element->identity().movable)
+        return fail(tr("此元素的位置由音乐时间决定，请选择标题、记号或其他非音符元素。"));
+    auto view = m_view;
+    auto offsets = view["elementOffsets"].toObject();
+    auto key = element->identity().key;
+    auto old = offsets.value(key).toObject();
+    offsets[key] =
+        QJsonObject{{"x", old["x"].toDouble() + delta.x()}, {"y", old["y"].toDouble() + delta.y()}};
+    view["elementOffsets"] = offsets;
+    setViewSettings(view, mergeKey);
+    return true;
+}
 void ScoreDocument::syncSourceLayout()
 {
+    for (int pass = 0; pass < 8; ++pass)
+        if (!syncSourceLayoutPass())
+            return;
+}
+bool ScoreDocument::syncSourceLayoutPass()
+{
     if (!m_project || m_input.contains("draftSource"))
-        return;
+        return false;
     auto score = snapshot();
-    auto format = FanqieFormat();
+    const auto &format = m_projection->format();
     const bool projected = !m_input.contains("source") || m_input.value("protected").toBool();
-    auto source = m_input["source"].toString();
+    auto source = m_input.value("source").toString();
     if (projected)
     {
         source = format.fromSnapshot(score);
@@ -22,8 +54,10 @@ void ScoreDocument::syncSourceLayout()
     }
     auto parsed = projected ? format.parse(source, m_view.value("inputHabits").toObject())
                             : parseText(source);
-    if (parsed.hasErrors() || m_input["hasErrors"].toBool())
-        return;
+    if (!parsed.canProject())
+        return false;
+    if (!projected && m_input.contains("overflow"))
+        parsed.restoreOverflow(m_input["overflow"].toArray());
     auto oldBindings = m_input["bindings"].toArray();
     if (projected)
         oldBindings = {};
@@ -38,6 +72,13 @@ void ScoreDocument::syncSourceLayout()
         tracks[voice.key()] = projected ? projectedTracks.value(visibleVoice++) : track;
         track += 4;
     }
+    if (projected)
+        for (auto &note : parsed.notes)
+            for (const auto &measure : score.measures)
+                for (const auto &event : measure.events)
+                    if (!event.grace && event.track == tracks.value(note.voice) &&
+                        event.position == note.position)
+                        note.id = "native:" + event.id;
     for (auto &note : parsed.notes)
         for (auto value : oldBindings)
         {
@@ -58,16 +99,13 @@ void ScoreDocument::syncSourceLayout()
                     }
             break;
         }
-    QVector<MusicalTime> starts;
-    auto layout = JianpuLayout().layout(score, m_view);
-    for (const auto &system : layout.systems)
-        starts << system.start;
-    auto aligned = format.alignedSource(parsed, starts);
+    auto layout = m_projection->layout(score, m_view);
+    auto aligned = m_projection->align(parsed, layout);
     if (aligned == m_input["source"].toString() && m_input.contains("bindings"))
-        return;
+        return false;
     auto updated = format.parse(aligned, m_view.value("inputHabits").toObject());
-    if (updated.hasErrors())
-        return;
+    if (!updated.canProject())
+        return false;
     QJsonArray bindings, automaticBreaks;
     QJsonArray automaticBars;
     for (const auto &b : updated.boundaries)
@@ -105,5 +143,19 @@ void ScoreDocument::syncSourceLayout()
     m_input["automaticBarOffsets"] = automaticBars;
     m_input["source"] = aligned;
     m_input["bindings"] = bindings;
+    m_input["overflow"] = updated.overflowJson();
+    // Reflow changes source line numbers. Recompute locations while keeping
+    // lyrics detached by deletions, which intentionally have no source token.
+    QStringList unassigned;
+    for (auto value : m_input["pendingLyrics"].toArray())
+        unassigned << value.toString();
+    for (const auto &word : updated.pendingLyrics)
+        unassigned.removeOne(word);
+    auto messages = updated.messages();
+    if (!unassigned.isEmpty())
+        messages << tr("已删除音符的歌词待分配：%1").arg(unassigned.join(" "));
+    m_input["messages"] = QJsonArray::fromStringList(messages);
+    m_input["hasErrors"] = updated.hasErrors() || !unassigned.isEmpty();
+    return true;
 }
 } // namespace jianpu

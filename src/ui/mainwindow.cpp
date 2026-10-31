@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "mainwindow.h"
 #include "input/inputcontroller.h"
+#include "layout/visualelement.h"
 #include "layoutpanel.h"
 #include "scorecanvas.h"
 #include "sourceeditor.h"
@@ -198,6 +199,26 @@ void MainWindow::buildMenus()
     toolbar->addSeparator();
     toolbar->addActions({m_undo, m_redo});
     toolbar->addSeparator();
+    auto *entryMode = new QComboBox;
+    entryMode->setObjectName("entryMode");
+    entryMode->addItem(tr("末尾追加"), int(EntryMode::Append));
+    entryMode->addItem(tr("修改音符"), int(EntryMode::Overwrite));
+    entryMode->addItem(tr("选后插入"), int(EntryMode::Insert));
+    toolbar->addWidget(entryMode);
+    connect(entryMode, &QComboBox::activated, this,
+            [this, entryMode](int)
+            {
+                if (m_input && !m_input->flush())
+                    return;
+                auto mode = EntryMode(entryMode->currentData().toInt());
+                if (mode == EntryMode::Append)
+                    m_canvas->selectAppendPosition(m_canvas->activeTrack());
+                m_canvas->entryController()->setMode(mode);
+                m_canvas->setFocus();
+            });
+    connect(m_canvas->entryController(), &ScoreEntryController::modeChanged, entryMode,
+            [entryMode](EntryMode mode)
+            { entryMode->setCurrentIndex(entryMode->findData(int(mode))); });
     m_duration = new QComboBox;
     for (int value : {1, 2, 4, 8, 16, 32, 64, 128})
         m_duration->addItem(tr("1/%1 音符").arg(value), value);
@@ -308,7 +329,8 @@ void MainWindow::buildMenus()
                 this, tr("简谱编辑"),
                 tr("点击音符后依次覆盖；Ctrl+点击或框选多个音符。\n1–7 修改音高，0 "
                    "休止符，8 隐藏休止符，9 节奏 X；End 在末尾追加。\n← → 选择前后音符，↑ ↓ "
-                   "改音高，Ctrl+↑↓ 切换声部。\nF6 切换文字／谱面输入；Esc 返回命令。B/Z/D/P "
+                   "选择声部，Alt+↑↓ 改音高，Ctrl+↑↓ 切换声部。\n点击文字稿或谱面切换编辑；Insert "
+                   "切换插入／修改。B/Z/D/P "
                    "编辑题目、词曲、调号、拍号；Q 新声部，C 新歌词；/ 减时，- 增时，' 和 , "
                    "改八度。\nL 编辑所选歌词，Ctrl+C/V 复制粘贴，Ctrl+Z/Y "
                    "撤销重做。\n跨音符记号需选择同一声部的起止音符。"));
@@ -502,9 +524,16 @@ void MainWindow::refresh()
 }
 void MainWindow::selectionChanged()
 {
-    auto ids = m_canvas->selection();
+    auto ids = m_canvas->modelSelection();
     m_selectionInfo->setText(ids.isEmpty() ? tr("未选择音符")
                                            : tr("已选择 %1 个元素").arg(ids.size()));
+    if (m_canvas->selection().size() == 1)
+    {
+        auto element = m_canvas->layoutResult().elements.value(m_canvas->selection().first());
+        if (element && element->identity().movable)
+            m_selectionInfo->setText(element->identity().label +
+                                     tr("\n拖动调整；方向键 1 px，Alt+方向键 0.2 px"));
+    }
     m_lyrics->clear();
     if (ids.isEmpty())
         return;

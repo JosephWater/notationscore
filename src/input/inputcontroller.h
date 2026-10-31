@@ -19,7 +19,6 @@ class InputController final : public QObject
     InputController(ScoreDocument *, ScoreCanvas *, QMainWindow *);
     bool flush();
     SourceEditor *editor() const { return m_editor; }
-    void toggleMode();
     void sourceSelection();
   signals:
     void error(const QString &);
@@ -35,14 +34,13 @@ class InputController final : public QObject
     QLineEdit *m_inline;
     QLabel *m_context;
     QTimer m_timer;
-    bool m_refreshing = false, m_music = false, m_seenQ = false, m_sourceMode = true,
-         m_composing = false;
+    bool m_refreshing = false, m_seenQ = false, m_composing = false;
     bool m_annotation = false;
     bool m_globalLyrics = false;
     int m_lyricVerse = 0;
     QString m_lyricBase;
     int m_voice = 1, m_inlineStart = -1;
-    QString m_inlinePrefix, m_lastGood;
+    QString m_inlinePrefix;
     QString m_observedSource;
     SourceChanges m_sourceChanges;
     void refresh();

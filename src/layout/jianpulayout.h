@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "core/scoretypes.h"
+#include "scorelayout.h"
 #include <QColor>
 #include <QFont>
 #include <QHash>
 #include <QPainterPath>
 #include <QRectF>
+#include <memory>
 
 namespace jianpu
 {
+class VisualElement;
 struct LayoutItem
 {
     enum class Kind
@@ -31,6 +34,7 @@ struct LayoutItem
     Qt::PenStyle penStyle = Qt::SolidLine;
     Qt::Alignment alignment = Qt::AlignCenter;
     QColor color;
+    QString elementId;
 };
 struct HitRegion
 {
@@ -48,20 +52,23 @@ struct LayoutResult
     {
         MusicalTime start, end;
         QRectF bounds;
+        QVector<int> tracks;
     };
     quint64 revision = 0;
     QVector<QRectF> pages;
     QVector<LayoutItem> items;
     QVector<HitRegion> hits;
     QVector<SystemRange> systems;
+    QHash<QString, std::shared_ptr<const VisualElement>> elements;
     QSizeF size;
     QStringList warnings;
     const HitRegion *hitTest(QPointF point) const;
 };
-class JianpuLayout
+class JianpuLayout : public IScoreLayout
 {
   public:
-    LayoutResult layout(const ScoreSnapshot &score, const QJsonObject &settings = {}) const;
+    LayoutResult layout(const ScoreSnapshot &score,
+                        const QJsonObject &settings = {}) const override;
     static QString keyLabel(int fifths, bool minor);
     static QString noteText(const NoteData &note, int fifths, bool natural = false);
     static int octaveDots(const NoteData &note, int fifths);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "scorecanvas.h"
+#include "layout/visualelement.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QJsonArray>
@@ -19,10 +20,13 @@ namespace jianpu
 ScoreCanvas::ScoreCanvas(ScoreDocument *document, QWidget *parent)
     : QWidget(parent), m_document(document)
 {
+    m_entry = new ScoreEntryController(document, this, this);
+    connect(m_entry, &ScoreEntryController::error, this, &ScoreCanvas::operationFailed);
     setObjectName("scoreCanvas");
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(tr("简谱编辑画布"));
-    setToolTip(tr("点击音符后依次覆盖；Ctrl+点击或框选多选；End 到末尾追加；方向键移动／改音高"));
+    setToolTip(tr("点击音符后依次覆盖；Ctrl+点击或框选多选；End 到末尾追加；方向键选择；Insert "
+                  "切换插入；Alt+↑↓ 改音高"));
     connect(document, &ScoreDocument::changed, this, &ScoreCanvas::refresh);
     refresh();
 }
@@ -45,7 +49,8 @@ void ScoreCanvas::refresh()
             activeExists = true;
     if (!activeExists && !m_score.voices.isEmpty())
         m_track = m_score.voices.first().track;
-    m_layout = JianpuLayout().layout(m_score, m_document->viewSettings());
+    m_layout = m_document->presentation();
+    buildInputSlots();
     QSet<QString> inputEvents;
     for (const auto &measure : m_score.measures)
         for (const auto &event : measure.events)
@@ -123,7 +128,7 @@ void ScoreCanvas::setActiveTrack(int track)
 {
     m_track = track;
     m_selection.clear();
-    m_lastInputTick = -1;
+    m_entry->selectTarget(false);
     update();
     emit selectionChanged();
 }
@@ -137,10 +142,9 @@ void ScoreCanvas::setZoom(qreal zoom)
 }
 void ScoreCanvas::setInputDuration(int denominator, int dots)
 {
-    m_denominator = denominator;
-    m_dots = dots;
+    m_entry->setInputDuration(denominator, dots);
 }
-void ScoreCanvas::paintScore(QPainter &p, const QRectF &exposed) const
+void ScoreCanvas::paintScore(QPainter &p, const QRectF &exposed, bool interactive) const
 {
     p.setRenderHint(QPainter::Antialiasing);
     p.fillRect(exposed, QColor("#dce1e7"));
@@ -152,15 +156,18 @@ void ScoreCanvas::paintScore(QPainter &p, const QRectF &exposed) const
     p.setPen(Qt::NoPen);
     p.setBrush(QColor("#d7eaff"));
     for (const auto &hit : m_layout.hits)
-        if (m_selection.contains(hit.id))
+        if (interactive && m_selection.contains(hit.id))
             p.drawRoundedRect(hit.rect.adjusted(-2, -2, 2, 2), 3, 3);
     for (const auto &item : m_layout.items)
     {
         if (!item.bounds.adjusted(-20, -20, 20, 20).intersects(exposed))
             continue;
-        QColor color = item.color.isValid() ? item.color
-                                            : (m_selection.contains(item.id) ? QColor("#1262bd")
-                                                                             : QColor("#20252b"));
+        QColor color =
+            item.color.isValid()
+                ? item.color
+                : (m_selection.contains(item.elementId.isEmpty() ? item.id : item.elementId)
+                       ? QColor("#1262bd")
+                       : QColor("#20252b"));
         p.setPen(QPen(color, item.strokeWidth, item.penStyle));
         p.setBrush(color);
         switch (item.kind)
@@ -184,10 +191,17 @@ void ScoreCanvas::paintScore(QPainter &p, const QRectF &exposed) const
             break;
         }
     }
-    if (m_keyboardInput && !m_selection.isEmpty())
+    if (interactive && hasFocus())
+        for (auto it = m_inputSlots.begin(); it != m_inputSlots.end(); ++it)
+        {
+            p.setPen(QPen(QColor("#8798ae"), 1, Qt::DashLine));
+            p.setBrush(Qt::NoBrush);
+            p.drawRoundedRect(it.value(), 3, 3);
+        }
+    if (interactive && m_keyboardInput && !m_selection.isEmpty())
     {
         for (const auto &hit : m_layout.hits)
-            if (m_selection.contains(hit.id))
+            if (m_selection.contains(hit.id) && (!hit.eventId.isEmpty() || atAppendPosition()))
             {
                 p.setPen(QPen(QColor("#2572c3"), 1.5));
                 p.drawLine(QPointF(hit.rect.right() + 7, hit.rect.top()),
@@ -206,8 +220,10 @@ void ScoreCanvas::paintEvent(QPaintEvent *event)
 {
     QPainter painter(this);
     painter.scale(m_zoom, m_zoom);
-    paintScore(painter, QRectF(event->rect().x() / m_zoom, event->rect().y() / m_zoom,
-                               event->rect().width() / m_zoom, event->rect().height() / m_zoom));
+    paintScore(painter,
+               QRectF(event->rect().x() / m_zoom, event->rect().y() / m_zoom,
+                      event->rect().width() / m_zoom, event->rect().height() / m_zoom),
+               true);
 }
 void ScoreCanvas::selectId(const QString &id)
 {
@@ -218,16 +234,47 @@ void ScoreCanvas::selectId(const QString &id)
     update();
     emit selectionChanged();
 }
+QStringList ScoreCanvas::modelSelection() const
+{
+    QStringList result;
+    for (const auto &id : m_selection)
+    {
+        auto element = m_layout.elements.value(id);
+        auto model = element ? element->identity().modelId : id;
+        if (!model.startsWith("@") && !model.isEmpty() && !result.contains(model))
+            result << model;
+    }
+    return result;
+}
 void ScoreCanvas::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() != Qt::LeftButton)
         return;
     setFocus();
     auto point = event->position() / m_zoom;
+    for (auto it = m_inputSlots.begin(); it != m_inputSlots.end(); ++it)
+        if (it.value().adjusted(-3, -3, 3, 3).contains(point))
+        {
+            selectAppendPosition(it.key());
+            m_entry->selectTarget(true);
+            return;
+        }
     const auto *hit = m_layout.hitTest(point);
     if (hit)
     {
-        m_lastInputTick = -1;
+        auto element = m_layout.elements.value(hit->id);
+        if (element && element->identity().movable)
+        {
+            selectId(hit->id);
+            m_keyboardInput = false;
+            m_document->sealInputGroup();
+            m_dragElement = hit->id;
+            m_dragLayout = m_layout;
+            m_dragStart = point;
+            m_elementDelta = {};
+            return;
+        }
+        m_entry->selectTarget(false);
         m_keyboardInput = !hit->eventId.isEmpty();
         if (event->modifiers() & Qt::ControlModifier)
         {
@@ -253,6 +300,14 @@ void ScoreCanvas::mousePressEvent(QMouseEvent *event)
 }
 void ScoreCanvas::mouseMoveEvent(QMouseEvent *event)
 {
+    if (!m_dragElement.isEmpty())
+    {
+        m_elementDelta = event->position() / m_zoom - m_dragStart;
+        m_layout = m_dragLayout;
+        m_layout.elements.value(m_dragElement)->translate(m_layout, m_elementDelta);
+        update();
+        return;
+    }
     if (m_dragging)
     {
         m_dragEnd = event->position() / m_zoom;
@@ -261,6 +316,15 @@ void ScoreCanvas::mouseMoveEvent(QMouseEvent *event)
 }
 void ScoreCanvas::mouseReleaseEvent(QMouseEvent *)
 {
+    if (!m_dragElement.isEmpty())
+    {
+        auto id = m_dragElement;
+        m_dragElement.clear();
+        if (!m_elementDelta.isNull())
+            m_document->moveElement(id, m_elementDelta);
+        m_dragLayout = {};
+        return;
+    }
     if (!m_dragging)
         return;
     m_dragging = false;
@@ -276,11 +340,65 @@ void ScoreCanvas::mouseDoubleClickEvent(QMouseEvent *event)
 {
     if (auto *hit = m_layout.hitTest(event->position() / m_zoom))
     {
+        auto element = m_layout.elements.value(hit->id);
+        if (element && !element->identity().headerField.isEmpty())
+        {
+            emit editHeaderRequested(element->identity().headerField);
+            return;
+        }
         if (hit->eventId.isEmpty())
             emit editMarkRequested();
         else
             emit editLyricsRequested();
     }
+}
+void ScoreCanvas::buildInputSlots()
+{
+    m_inputSlots.clear();
+    for (const auto &voice : m_score.voices)
+    {
+        if (voice.percussion)
+            continue;
+        const EventData *last = nullptr;
+        for (const auto &measure : m_score.measures)
+            for (const auto &e : measure.events)
+                if (e.track == voice.track && !e.grace && !e.logicalId.isEmpty() &&
+                    (!last || e.position > last->position))
+                    last = &e;
+        const HitRegion *anchor = nullptr;
+        for (const auto &hit : m_layout.hits)
+            if (!hit.eventId.isEmpty() && hit.track == voice.track &&
+                (!last || hit.eventId == last->id))
+            {
+                anchor = &hit;
+                break;
+            }
+        if (!anchor)
+            continue;
+        QRectF rect(anchor->rect.right() + 15, anchor->rect.top(), 22, anchor->rect.height());
+        if (last)
+        {
+            for (const auto &hit : m_layout.hits)
+                if (!hit.eventId.isEmpty() && hit.track == voice.track &&
+                    hit.tick == (last->position + last->length).ticks())
+                {
+                    rect.moveCenter(hit.rect.center());
+                    break;
+                }
+        }
+        m_inputSlots[voice.track] = rect;
+        m_layout.hits << HitRegion{QString("@input:%1").arg(voice.track), {}, rect, voice.track};
+    }
+}
+void ScoreCanvas::selectAppendPosition(int track)
+{
+    m_track = track;
+    selectId(QString("@input:%1").arg(track));
+    m_keyboardInput = true;
+}
+bool ScoreCanvas::atAppendPosition() const
+{
+    return m_selection.contains(QString("@input:%1").arg(m_track));
 }
 void ScoreCanvas::selectNext(int direction)
 {
@@ -289,23 +407,69 @@ void ScoreCanvas::selectNext(int direction)
     for (const auto &h : m_layout.hits)
         if (h.track == m_track && !h.eventId.isEmpty() && !seen.contains(h.eventId))
         {
+            bool written = false;
+            for (const auto &m : m_score.measures)
+                for (const auto &e : m.events)
+                    if (e.id == h.eventId)
+                        written = !e.logicalId.isEmpty() ||
+                                  m_document->inputState()["protected"].toBool();
+            if (!written)
+                continue;
             seen.insert(h.eventId);
             hits << &h;
         }
     std::sort(hits.begin(), hits.end(), [](auto a, auto b) { return a->tick < b->tick; });
-    if (hits.isEmpty())
-        return;
-    int current = -1;
+    int current = atAppendPosition() ? hits.size() : -1;
     for (int i = 0; i < hits.size(); ++i)
         if (m_selection.contains(hits[i]->id))
             current = i;
-    int next = current < 0 ? 0 : std::clamp(current + direction, 0, int(hits.size()) - 1);
-    selectId(hits[next]->id);
+    int next = current < 0 ? 0 : std::max(0, current + direction);
+    if (next >= hits.size())
+        selectAppendPosition(m_track);
+    else
+        selectId(hits[next]->id);
+    m_entry->selectTarget(atAppendPosition());
+    m_keyboardInput = true;
+}
+void ScoreCanvas::selectVertical(int direction)
+{
+    const HitRegion *current = nullptr;
+    for (const auto &h : m_layout.hits)
+        if (m_selection.contains(h.id))
+        {
+            current = &h;
+            break;
+        }
+    if (!current)
+        return;
+    const HitRegion *next = nullptr;
+    qreal nearestRow = 1e9, nearestX = 1e9;
+    for (const auto &h : m_layout.hits)
+    {
+        if (h.eventId.isEmpty() && !h.id.startsWith("@input:"))
+            continue;
+        qreal dy = (h.rect.center().y() - current->rect.center().y()) * direction;
+        if (dy < 12)
+            continue;
+        qreal dx = std::abs(h.rect.center().x() - current->rect.center().x());
+        if (dy < nearestRow - 5 || (std::abs(dy - nearestRow) <= 5 && dx < nearestX))
+        {
+            next = &h;
+            nearestRow = dy;
+            nearestX = dx;
+        }
+    }
+    if (next)
+    {
+        selectId(next->id);
+        m_keyboardInput = true;
+        m_entry->selectTarget(atAppendPosition());
+    }
 }
 bool ScoreCanvas::apply(EditRequest request)
 {
     if (request.ids.isEmpty())
-        request.ids = m_selection;
+        request.ids = modelSelection();
     if (!m_document->edit(request))
     {
         emit operationFailed(m_document->error());
@@ -330,6 +494,25 @@ void ScoreCanvas::paste()
 }
 void ScoreCanvas::keyPressEvent(QKeyEvent *event)
 {
+    if (event->key() >= Qt::Key_Left && event->key() <= Qt::Key_Down && m_selection.size() == 1)
+    {
+        auto element = m_layout.elements.value(m_selection.first());
+        if (element && element->identity().movable)
+        {
+            qreal step = event->modifiers() & Qt::ShiftModifier ? 10.0
+                         : event->modifiers() & Qt::AltModifier ? 0.2
+                                                                : 1.0;
+            QPointF delta(event->key() == Qt::Key_Left    ? -step
+                          : event->key() == Qt::Key_Right ? step
+                                                          : 0,
+                          event->key() == Qt::Key_Up     ? -step
+                          : event->key() == Qt::Key_Down ? step
+                                                         : 0);
+            m_document->moveElement(m_selection.first(), delta, "move:" + element->identity().key);
+            event->accept();
+            return;
+        }
+    }
     using K = EditRequest::Kind;
     if (event->matches(QKeySequence::Undo))
         m_document->undo();
@@ -341,153 +524,63 @@ void ScoreCanvas::keyPressEvent(QKeyEvent *event)
         paste();
     else if (event->key() == Qt::Key_Escape)
     {
-        m_lastInputTick = -1;
+        if (!m_dragElement.isEmpty())
+        {
+            m_layout = m_dragLayout;
+            m_dragElement.clear();
+            m_dragLayout = {};
+        }
+        m_dragging = false;
         m_selection.clear();
-        setCursor(Qt::ArrowCursor);
+        m_entry->selectTarget(false);
+        m_keyboardInput = false;
         update();
         emit selectionChanged();
     }
-    else if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)
+    else if (event->key() == Qt::Key_End)
     {
-        m_lastInputTick = -1;
-        selectNext(event->key() == Qt::Key_Left ? -1 : 1);
+        selectAppendPosition(m_track);
+        m_entry->selectTarget(true);
     }
+    else if (event->key() == Qt::Key_Insert)
+    {
+        m_entry->setMode(m_entry->mode() == EntryMode::Insert ? EntryMode::Overwrite
+                                                              : EntryMode::Insert);
+    }
+    else if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)
+        selectNext(event->key() == Qt::Key_Left ? -1 : 1);
     else if (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)
     {
-        m_lastInputTick = -1;
         bool up = event->key() == Qt::Key_Up;
-        bool octave = event->modifiers() & Qt::ControlModifier;
-        apply(
-            {octave ? (up ? K::OctaveUp : K::OctaveDown) : (up ? K::DiatonicUp : K::DiatonicDown)});
+        if (event->modifiers() & Qt::AltModifier)
+            apply({event->modifiers() & Qt::ControlModifier
+                       ? (up ? K::OctaveUp : K::OctaveDown)
+                       : (up ? K::DiatonicUp : K::DiatonicDown)});
+        else
+            selectVertical(up ? -1 : 1);
     }
-    else if (event->key() >= Qt::Key_0 && event->key() <= Qt::Key_9)
-    {
-        if (m_selection.isEmpty())
-            selectNext();
-        QString inputId = m_selection.value(0);
-        qint64 tick = -1;
-        int denominator = 0;
-        for (const auto &hit : m_layout.hits)
-            if (m_selection.contains(hit.id))
-            {
-                tick = hit.tick;
-                break;
-            }
-        for (const auto &measure : m_score.measures)
-            for (const auto &e : measure.events)
-                if (e.track == m_track && e.tick == tick && e.denominator == 0 &&
-                    e.logicalId.isEmpty() && !m_document->inputState().value("protected").toBool())
-                    denominator = m_denominator;
-        if (apply({event->key() == Qt::Key_0 ? K::InsertRest : K::SetDegree,
-                   {},
-                   event->key() - Qt::Key_0,
-                   denominator,
-                   {},
-                   m_dots}))
-        {
-            m_lastInputTick = tick;
-            m_lastInputTrack = m_track;
-            m_lastInputNoteId = inputId;
-            advanceInput(tick, m_track);
-        }
-    }
-    else if (event->text().size() == 1 && QString("/-.',#$=").contains(event->text()[0]))
-        editLastSuffix(event->text()[0]);
-    else if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)
+    else if (event->key() == Qt::Key_Backspace)
+        m_entry->backspace();
+    else if (event->key() == Qt::Key_Delete)
         apply({K::Delete});
     else if (event->key() == Qt::Key_L)
         emit editLyricsRequested();
+    else if (!event->text().isEmpty() && event->text()[0].isPrint())
+    {
+        if (m_selection.isEmpty())
+        {
+            selectAppendPosition(m_track);
+            m_entry->selectTarget(true);
+        }
+        m_keyboardInput = true;
+        m_entry->input(event->text());
+    }
     else
     {
         QWidget::keyPressEvent(event);
         return;
     }
     event->accept();
-}
-void ScoreCanvas::advanceInput(qint64 tick, int track)
-{
-    const EventData *current = nullptr, *next = nullptr;
-    bool protectedScore = m_document->inputState().value("protected").toBool();
-    for (const auto &m : m_score.measures)
-        for (const auto &e : m.events)
-            if (!e.grace && e.track == track && e.tick == tick)
-                current = &e;
-    if (!current)
-        return;
-    auto end = current->position + current->length;
-    for (const auto &m : m_score.measures)
-        for (const auto &e : m.events)
-            if (!e.grace && e.track == track && e.position >= end &&
-                (!e.logicalId.isEmpty() || protectedScore) &&
-                (e.notes.isEmpty() || std::any_of(e.notes.begin(), e.notes.end(),
-                                                  [](const auto &n) { return !n.tieEnd; })) &&
-                (!next || e.position < next->position))
-                next = &e;
-    const auto &e = next ? *next : *current;
-    selectId(e.notes.isEmpty() ? e.id : e.notes.first().id);
-}
-bool ScoreCanvas::editLastSuffix(QChar suffix)
-{
-    const EventData *target = nullptr;
-    for (const auto &measure : m_score.measures)
-        for (const auto &e : measure.events)
-        {
-            if (e.grace)
-                continue;
-            bool selected = m_selection.contains(e.id);
-            for (const auto &n : e.notes)
-                selected |= m_selection.contains(n.id);
-            if ((m_lastInputTick >= 0 && e.tick == m_lastInputTick &&
-                 e.track == m_lastInputTrack) ||
-                (m_lastInputTick < 0 && selected))
-                target = &e;
-        }
-    if (!target)
-        return false;
-    const auto current = *target;
-    QStringList ids{current.notes.isEmpty() ? current.id : current.notes.first().id};
-    for (const auto &n : current.notes)
-        if ((m_lastInputTick >= 0 && n.id == m_lastInputNoteId) ||
-            (m_lastInputTick < 0 && m_selection.contains(n.id)))
-            ids = {n.id};
-    using K = EditRequest::Kind;
-    auto applySuffix = [&](EditRequest request)
-    {
-        bool ok = apply(std::move(request));
-        if (ok && m_lastInputTick >= 0)
-            advanceInput(m_lastInputTick, m_lastInputTrack);
-        return ok;
-    };
-    if (suffix == '\'' || suffix == ',' || suffix == '#' || suffix == '$' || suffix == '=')
-        return applySuffix({suffix == '\''  ? K::OctaveUp
-                            : suffix == ',' ? K::OctaveDown
-                            : suffix == '#' ? K::Sharp
-                            : suffix == '$' ? K::Flat
-                                            : K::Natural,
-                            ids});
-    MusicalTime written = current.denominator > 0
-                              ? MusicalTime((1LL << (current.dots + 1)) - 1,
-                                            current.denominator * (1LL << current.dots))
-                              : current.length;
-    if (suffix == '/')
-        written = written / MusicalTime(2);
-    else if (suffix == '-')
-        written += MusicalTime(1, 4);
-    else if (suffix == '.')
-    {
-        if (current.dots >= 2)
-        {
-            emit operationFailed(tr("谱面覆盖输入目前支持两个附点；更复杂时值可在文字稿中填写。"));
-            return false;
-        }
-        return applySuffix({K::Duration, ids, std::max(1, current.denominator), current.dots + 1});
-    }
-    for (int denominator = 1; denominator <= 128; denominator *= 2)
-        for (int dots = 0; dots <= 2; ++dots)
-            if (written == MusicalTime((1LL << (dots + 1)) - 1, denominator * (1LL << dots)))
-                return applySuffix({K::Duration, ids, denominator, dots});
-    emit operationFailed(tr("此复合时值请在文字稿中填写；当前音符未修改。"));
-    return false;
 }
 void ScoreCanvas::wheelEvent(QWheelEvent *event)
 {
