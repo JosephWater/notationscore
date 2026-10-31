@@ -32,7 +32,8 @@ class ScoreDocument final : public QObject
     QString filePath() const { return m_path; }
     QJsonObject viewSettings() const { return m_view; }
     void setViewSettings(const QJsonObject &value, const QString &mergeKey = {});
-    bool applyText(const QString &source, const QString &mergeKey = {});
+    bool applyText(const QString &source, const QString &mergeKey = {},
+                   const SourceChanges &changes = {});
     QString sourceText() const;
     QJsonObject inputState() const { return m_input; }
     void setInputState(const QJsonObject &state);
@@ -68,10 +69,10 @@ class ScoreDocument final : public QObject
     QString m_mergeKey;
     HistoryState historyState() const { return {m_project, m_view, m_input}; }
     void recordChange(const HistoryState &, bool engine = false, const QString &mergeKey = {});
-    void applyBindings(TextParseResult &parsed) const;
+    void applyBindings(TextParseResult &parsed, const SourceChanges &changes = {}) const;
     void syncSourceAfterEdit(const EditRequest &, const ScoreSnapshot &before);
     void syncSourceLayout();
-    TextParseResult parseText(const QString &) const;
+    TextParseResult parseText(const QString &, const SourceChanges &changes = {}) const;
     bool m_imported = false;
     QVector<quint64> m_states{0};
     int m_cursor = 0;

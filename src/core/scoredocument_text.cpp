@@ -21,7 +21,7 @@
 
 namespace jianpu
 {
-TextParseResult ScoreDocument::parseText(const QString &source) const
+TextParseResult ScoreDocument::parseText(const QString &source, const SourceChanges &changes) const
 {
     auto habits = m_view.value("inputHabits").toObject();
     auto old = m_input["source"].toString();
@@ -35,7 +35,23 @@ TextParseResult ScoreDocument::parseText(const QString &source) const
     for (auto value : m_input.value("automaticBarOffsets").toArray())
     {
         int p = value.toInt();
-        if (p < prefix)
+        if (changes.before == old && !changes.edits.isEmpty())
+        {
+            bool alive = true;
+            for (const auto &edit : changes.edits)
+            {
+                if (p >= edit.offset && p < edit.offset + edit.removed)
+                {
+                    alive = false;
+                    break;
+                }
+                if (p >= edit.offset + edit.removed)
+                    p += edit.added - edit.removed;
+            }
+            if (alive)
+                offsets << p;
+        }
+        else if (p < prefix)
             offsets << p;
         else if (p >= old.size() - suffix)
             offsets << p + source.size() - old.size();
@@ -103,7 +119,7 @@ void ScoreDocument::storeInputDraft(const QString &source, const QString &error)
     recordChange(before);
     notify();
 }
-void ScoreDocument::applyBindings(TextParseResult &parsed) const
+void ScoreDocument::applyBindings(TextParseResult &parsed, const SourceChanges &changes) const
 {
     auto oldSource = m_input.value("source").toString();
     auto bindings = m_input.value("bindings").toArray();
@@ -117,6 +133,7 @@ void ScoreDocument::applyBindings(TextParseResult &parsed) const
                parsed.source[parsed.source.size() - 1 - suffix])
         ++suffix;
     int delta = parsed.source.size() - oldSource.size();
+    const bool exact = changes.before == oldSource && !changes.edits.isEmpty();
     bool preserveLyrics = lyricLines(oldSource) == lyricLines(parsed.source);
     if (preserveLyrics && !bindings.isEmpty())
     {
@@ -138,6 +155,28 @@ void ScoreDocument::applyBindings(TextParseResult &parsed) const
             int offset = b["offset"].toInt();
             bool same = (offset + b["length"].toInt() <= prefix && offset == note.offset) ||
                         (offset >= oldSource.size() - suffix && offset + delta == note.offset);
+            if (exact)
+            {
+                bool deleted = false;
+                int end = offset + b["length"].toInt();
+                for (const auto &edit : changes.edits)
+                {
+                    if (edit.removed && edit.offset <= offset &&
+                        edit.offset + edit.removed >= end && edit.added == 0)
+                        deleted = true;
+                    auto map = [&](int value, bool right)
+                    {
+                        if (value < edit.offset || (value == edit.offset && !right))
+                            return value;
+                        if (value >= edit.offset + edit.removed)
+                            return value + edit.added - edit.removed;
+                        return edit.offset;
+                    };
+                    offset = map(offset, true);
+                    end = map(end, false);
+                }
+                same = !deleted && offset == note.offset;
+            }
             if (same && !used.contains(b["id"].toString()))
             {
                 found = b;
@@ -145,7 +184,7 @@ void ScoreDocument::applyBindings(TextParseResult &parsed) const
             }
         }
         // A single-token replacement keeps its identity (pitch, octave and duration edits).
-        if (found.isEmpty())
+        if (found.isEmpty() && !exact)
         {
             QVector<QJsonObject> oldChanged;
             QVector<int> newChanged;
@@ -179,7 +218,7 @@ void ScoreDocument::applyBindings(TextParseResult &parsed) const
             auto lyrics = found["lyrics"].toObject();
             for (auto it = lyrics.begin(); it != lyrics.end(); ++it)
             {
-                if (note.degree == 0 || note.degree == 8)
+                if (note.degree == 0 || note.degree == 8 || note.tieBack)
                 {
                     if (!it.value().toString().isEmpty())
                         parsed.pendingLyrics << it.value().toString();
@@ -202,14 +241,15 @@ void ScoreDocument::applyBindings(TextParseResult &parsed) const
         parsed.diagnostics.push_back(
             {0, 1, 1, 1, tr("歌词待分配：%1").arg(parsed.pendingLyrics.join(" ")), true});
 }
-bool ScoreDocument::applyText(const QString &source, const QString &mergeKey)
+bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
+                              const SourceChanges &changes)
 {
     if (!m_input.contains("draftSource") && source == m_input.value("source").toString() &&
         m_input.contains("bindings") &&
         m_input.value("habits").toObject() == m_view.value("inputHabits").toObject())
         return true;
     const auto previous = historyState();
-    auto parsed = parseText(source);
+    auto parsed = parseText(source, changes);
     if (parsed.fatal)
         return fail(parsed.messages().join("\n"));
     bool protectedContent = m_input.value("protected").toBool();
@@ -268,7 +308,7 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey)
     }
     else
     {
-        applyBindings(parsed);
+        applyBindings(parsed, changes);
         auto xml = FanqieFormat().musicXml(parsed);
         if (xml.isEmpty())
             return fail(tr("时值过于复杂，无法在内核中精确表示；输入已保留，请调整连音比例。"));
@@ -508,7 +548,7 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
                         QStringList words;
                         for (const auto &target : parsed.notes)
                             if (target.segment == n.segment && target.voice == n.voice &&
-                                target.degree != 0 && target.degree != 8)
+                                target.degree != 0 && target.degree != 8 && !target.tieBack)
                             {
                                 auto word = target.lyrics.value(request.value, "@");
                                 QStringList chars;
@@ -568,13 +608,15 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
                     else
                     {
                         auto token = n;
-                        n.degree = current->rest ? (current->visible ? 0 : 8) : 1;
+                        n.degree = current->rest     ? (current->visible ? 0 : 8)
+                                   : current->rhythm ? 9
+                                                     : 1;
                         if (!current->notes.isEmpty())
                         {
                             auto note = current->notes[0];
                             int tonic = ((current->keyFifths * 4) % 7 + 7) % 7;
                             int relative = note.octave * 7 + note.step - 28 - tonic;
-                            n.degree = (relative % 7 + 7) % 7 + 1;
+                            n.degree = current->rhythm ? 9 : (relative % 7 + 7) % 7 + 1;
                             n.octave = int(std::floor(relative / 7.0));
                             static const int sharp[]{3, 0, 4, 1, 5, 2, 6},
                                 flat[]{6, 2, 5, 1, 4, 0, 3};
@@ -652,7 +694,7 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
                                 replacements << Replacement{n.offset + n.length, 0, fill};
                         }
                         auto prefix =
-                            QRegularExpression("^[0-9](?:[/\\-.,'#\\$=]|\\s+(?=[/\\-.,'#\\$=]))*")
+                            QRegularExpression("^[0-9](?:[/\\-.,'#\\$=^]|\\s+(?=[/\\-.,'#\\$=^]))*")
                                 .match(token.raw);
                         replacements << Replacement{token.offset, int(prefix.capturedLength()),
                                                     FanqieFormat::token(n)};
@@ -661,23 +703,33 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
         }
     std::sort(replacements.begin(), replacements.end(),
               [](auto a, auto b) { return a.start > b.start; });
+    SourceChanges changes;
+    changes.before = source;
     for (const auto &r : replacements)
+    {
+        changes.edits << SourceChange{r.start, r.length, int(r.text.size())};
         source.replace(r.start, r.length, r.text);
+    }
     if (!replacements.isEmpty())
     {
-        auto updated = parseText(source);
-        applyBindings(updated);
+        auto updated = parseText(source, changes);
+        applyBindings(updated, changes);
         QJsonArray bindings;
         auto oldBindings = m_input["bindings"].toArray();
-        for (int i = 0; i < updated.notes.size(); ++i)
-        {
-            auto n = updated.notes[i];
-            int track = (n.voice - 1) * 4;
-            if (i < oldBindings.size())
+        QMap<int, int> tracks;
+        for (const auto &old : parsed.notes)
+            for (auto value : oldBindings)
             {
-                track = oldBindings[i].toObject()["track"].toInt();
+                auto b = value.toObject();
+                if (b["offset"].toInt() == old.offset)
+                {
+                    tracks[old.voice] = b["track"].toInt();
+                    break;
+                }
             }
-            bindings << binding(n, track);
+        for (const auto &n : updated.notes)
+        {
+            bindings << binding(n, tracks.value(n.voice, (n.voice - 1) * 4));
         }
         m_input["source"] = source;
         QJsonArray automaticBars;

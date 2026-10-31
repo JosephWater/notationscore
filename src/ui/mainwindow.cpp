@@ -306,8 +306,8 @@ void MainWindow::buildMenus()
         {
             QMessageBox::information(
                 this, tr("简谱编辑"),
-                tr("点击选择，Shift+点击扩展范围，框选多个音符。\n1–7 修改音高，0 "
-                   "输入休止符；N 切换连续输入。\n← → 选择前后音符，↑ ↓ "
+                tr("点击音符后依次覆盖；Ctrl+点击或框选多个音符。\n1–7 修改音高，0 "
+                   "休止符，8 隐藏休止符，9 节奏 X；End 在末尾追加。\n← → 选择前后音符，↑ ↓ "
                    "改音高，Ctrl+↑↓ 切换声部。\nF6 切换文字／谱面输入；Esc 返回命令。B/Z/D/P "
                    "编辑题目、词曲、调号、拍号；Q 新声部，C 新歌词；/ 减时，- 增时，' 和 , "
                    "改八度。\nL 编辑所选歌词，Ctrl+C/V 复制粘贴，Ctrl+Z/Y "
@@ -419,7 +419,7 @@ void MainWindow::buildPanels()
     form->addRow(m_selectionInfo);
     m_verse = new QSpinBox;
     m_verse->setRange(1, 1024);
-    form->addRow(tr("歌词段数"), m_verse);
+    form->addRow(tr("歌词段次"), m_verse);
     m_lyrics = new QLineEdit;
     m_lyrics->setObjectName("lyricsEditor");
     m_lyrics->setPlaceholderText(tr("中文歌词"));

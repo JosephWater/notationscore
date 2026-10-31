@@ -531,6 +531,7 @@ bool ScoreDocument::edit(const EditRequest &request)
         return fail(tr("没有打开的曲谱"));
     const auto previousState = historyState();
     const auto previousSnapshot = snapshot();
+    auto sourceRequest = request;
     m_mergeKey.clear();
     auto *score = m_project->masterScore();
     std::vector<EngravingItem *> items;
@@ -615,17 +616,31 @@ bool ScoreDocument::edit(const EditRequest &request)
         case K::SetDegree:
         case K::InsertRest:
         {
-            if (!firstCR || request.value < 0 || request.value > 7)
+            if (!firstCR || request.value < 0 || request.value > 9)
             {
                 reject(tr("请选择一个有效输入位置"));
                 break;
             }
             NoteVal val;
-            if (request.kind == K::SetDegree && request.value > 0)
+            auto appearance = [&](ChordRest *cr, Note *selected = nullptr)
+            {
+                cr->undoChangeProperty(Pid::VISIBLE, request.value != 8);
+                if (cr->isChord())
+                    for (auto *note : toChord(cr)->notes())
+                    {
+                        if (selected && note != selected)
+                            continue;
+                        note->undoChangeProperty(Pid::HEAD_GROUP, request.value == 9
+                                                                      ? NoteHeadGroup::HEAD_CROSS
+                                                                      : NoteHeadGroup::HEAD_NORMAL);
+                        note->undoChangeProperty(Pid::PLAY, request.value != 9);
+                    }
+            };
+            if (request.kind == K::SetDegree && request.value > 0 && request.value != 8)
             {
                 auto key = firstCR->staff()->concertKey(firstCR->tick());
                 int tonic = (int(key) * 4 % 7 + 7) % 7;
-                int absoluteDegree = tonic + request.value - 1;
+                int absoluteDegree = tonic + (request.value == 9 ? 1 : request.value) - 1;
                 int step = absoluteDegree % 7;
                 int tpc = step2tpcByKey(step, key);
                 int octave = 4;
@@ -644,14 +659,19 @@ bool ScoreDocument::edit(const EditRequest &request)
                 if (first->isNote())
                 {
                     EditNote::undoChangePitch(score, toNote(first), val.pitch, val.tpc1, val.tpc2);
+                    appearance(firstCR, toNote(first));
                     break;
                 }
             }
             TDuration inputDuration(Fraction(1, request.secondary > 0 ? request.secondary : 4));
             inputDuration.setDots(std::clamp(request.dots, 0, 2));
             Fraction length = request.secondary > 0 ? inputDuration.fraction() : firstCR->ticks();
-            if (!score->setNoteRest(firstCR->segment(), firstCR->track(), val, length))
+            auto inputTrack = firstCR->track();
+            auto *written = score->setNoteRest(firstCR->segment(), inputTrack, val, length);
+            if (!written)
                 reject(tr("无法在此处输入音符"));
+            else if (auto *cr = written->element(inputTrack); cr && cr->isChordRest())
+                appearance(toChordRest(cr));
             break;
         }
         case K::Duration:
@@ -1052,6 +1072,39 @@ bool ScoreDocument::edit(const EditRequest &request)
         }
         if (ok)
         {
+            const bool pitchEdit =
+                request.kind == K::DiatonicUp || request.kind == K::DiatonicDown ||
+                request.kind == K::OctaveUp || request.kind == K::OctaveDown ||
+                request.kind == K::Sharp || request.kind == K::Flat || request.kind == K::Natural ||
+                (request.kind == K::SetDegree && request.value > 0 && request.value != 8);
+            if (pitchEdit)
+            {
+                QSet<Note *> visited;
+                for (auto *item : items)
+                    if (item->isNote() && !visited.contains(toNote(item)))
+                    {
+                        auto *anchor = toNote(item);
+                        for (auto *note : anchor->tiedNotes())
+                        {
+                            visited.insert(note);
+                            auto interval = note->staff()->transpose(note->tick());
+                            interval.flip();
+                            int tpc2 = Transpose::transposeTpc(anchor->tpc1(), interval, true);
+                            if (note->pitch() != anchor->pitch() ||
+                                note->tpc1() != anchor->tpc1() || note->tpc2() != tpc2)
+                                EditNote::undoChangePitch(score, note, anchor->pitch(),
+                                                          anchor->tpc1(), tpc2);
+                            if (request.kind == K::SetDegree)
+                            {
+                                note->undoChangeProperty(Pid::HEAD_GROUP, anchor->headGroup());
+                                note->undoChangeProperty(Pid::PLAY, request.value != 9);
+                            }
+                            auto id = idFor(note);
+                            if (!sourceRequest.ids.contains(id))
+                                sourceRequest.ids << id;
+                        }
+                    }
+            }
             auto ret = score->sanityCheck();
             if (!ret)
                 reject(tr("修改后曲谱结构检查失败：%1").arg(retError(ret)));
@@ -1070,7 +1123,7 @@ bool ScoreDocument::edit(const EditRequest &request)
         return fail(message);
     if (score->undoStack()->currentIndex() != before)
     {
-        syncSourceAfterEdit(request, previousSnapshot);
+        syncSourceAfterEdit(sourceRequest, previousSnapshot);
         syncSourceLayout();
         recordChange(previousState, true);
     }

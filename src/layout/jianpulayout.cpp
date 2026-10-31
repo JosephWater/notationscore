@@ -354,6 +354,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
     struct MeasureMetrics
     {
         QMap<MusicalTime, qreal> x;
+        QMap<MusicalTime, QPair<qreal, qreal>> ink;
         qreal width = 0;
     };
     QVector<MeasureMetrics> metrics;
@@ -386,6 +387,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                 noteLabels[note.id] = noteText(note, event.keyFifths, natural);
                 accidentalState[event.track][degree] = delta;
             }
+        MeasureMetrics mm;
         QMap<MusicalTime, qreal> widths;
         widths[MusicalTime(m.tick, 1920)] = 34;
         for (const auto &e : m.events)
@@ -393,21 +395,52 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             if (!maxChord.contains(e.track))
                 continue;
             qreal w = 36 * scale * style.noteGap;
+            qreal inkLeft = 0, inkRight = 0;
+            auto glyphExtent = [&](const QString &value, qreal px)
+            {
+                QFontMetricsF fm(style.font(px, style.noteBold, true));
+                auto ink = fm.tightBoundingRect(value);
+                qreal advance = fm.horizontalAdvance(value);
+                inkLeft = std::max(inkLeft, advance / 2 - ink.left());
+                inkRight = std::max(inkRight, ink.right() - advance / 2);
+            };
             for (const auto &n : e.notes)
+            {
+                glyphExtent(e.rhythm ? QStringLiteral("X") : noteLabels.value(n.id), noteSize);
                 w = std::max(w, QFontMetricsF(style.font(noteSize, style.noteBold, true))
                                         .horizontalAdvance(noteLabels.value(n.id)) +
                                     14 * scale);
+            }
             for (const auto &l : e.lyrics)
+            {
                 w = std::max(w, textWidth(l.text, lyricSize) + 14);
+            }
+            if (e.rest)
+            {
+                glyphExtent("0", noteSize);
+                if (e.denominator == 0 || e.denominator <= 2)
+                    inkRight += (std::max(1, int(std::ceil(restTicks(e) / 480.0))) - 1) * 26;
+            }
             if (e.rest && (e.denominator == 0 || e.denominator <= 2))
                 w = std::max(w, std::ceil(restTicks(e) / 480.0) * 26 + 18);
             if (e.denominator <= 2 && !e.rest)
+            {
                 w = std::max(w, (e.denominator == 1 ? 80.0 : 50.0) * scale);
+                inkRight = std::max(inkRight, e.denominator == 1 ? 62.0 : 32.0);
+            }
+            if (e.dots)
+                inkRight = std::max(inkRight, 16 + (e.dots - 1) * 6 + 1.8);
             if (!e.grace)
+            {
                 w += afterGraceCounts[e.track].value(e.tick) * 46;
+                inkLeft += graceCounts[e.track].value(e.tick) * 46;
+                inkRight += afterGraceCounts[e.track].value(e.tick) * 46;
+                auto &ink = mm.ink[timeOf(e)];
+                ink.first = std::max(ink.first, inkLeft);
+                ink.second = std::max(ink.second, inkRight);
+            }
             widths[timeOf(e)] = std::max(widths.value(timeOf(e)), w);
         }
-        MeasureMetrics mm;
         qreal x = 16;
         MusicalTime lastTick(m.tick, 1920);
         qreal lastWidth = 0;
@@ -522,40 +555,56 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             const auto &m = score.measures[mi];
             qreal width = equalColumns ? columnWidth : metrics[mi].width * factor;
             qreal measureScale = width / metrics[mi].width;
+            qreal inkLeft = width, inkRight = 0;
+            for (auto it = metrics[mi].ink.begin(); it != metrics[mi].ink.end(); ++it)
+            {
+                qreal center = metrics[mi].x.value(it.key()) * measureScale;
+                inkLeft = std::min(inkLeft, center - it->first);
+                inkRight = std::max(inkRight, center + it->second);
+            }
+            // Center the musical glyphs, including duration dashes,
+            // rather than scaling an asymmetric empty tail after the last note.
+            qreal centerShift = metrics[mi].ink.isEmpty() ? 0 : (width - inkLeft - inkRight) / 2;
             if (style.showMeasures)
                 text(m.id, QString::number(m.number), QRectF(measureX, y, 40, 20), 11);
             for (const auto &v : voices)
             {
                 qreal row = system.rowTop[v.track];
-                qreal bottom = row + maxChord[v.track] * noteSpacing[v.track] - 6;
+                QFontMetricsF fm(style.font(noteSize, style.noteBold, true));
+                qreal boxHeight = std::max(34.0, noteSize * 1.35);
+                qreal digitCenter = (boxHeight - fm.height()) / 2 + fm.ascent() +
+                                    fm.tightBoundingRect("0").center().y();
+                qreal top = row + digitCenter - noteSize * 0.7;
+                qreal bottom = row + (maxChord[v.track] - 1) * noteSpacing[v.track] + digitCenter +
+                               noteSize * 0.7;
+                qreal middle = (top + bottom) / 2;
                 if (m.repeatStart)
                 {
-                    line(m.id, QPointF(measureX, row + 3), QPointF(measureX, bottom), v.track);
+                    line(m.id, QPointF(measureX, top), QPointF(measureX, bottom), v.track);
                     out.items.last().strokeWidth = style.lineWidth * 2.5;
                 }
-                line(m.id, QPointF(measureX + width, row + 3), QPointF(measureX + width, bottom),
+                line(m.id, QPointF(measureX + width, top), QPointF(measureX + width, bottom),
                      v.track);
                 if (m.repeatEnd)
                     out.items.last().strokeWidth = style.lineWidth * 2.5;
                 if (m.barline == 32)
                 {
                     out.items.last().strokeWidth = style.lineWidth * 2.5;
-                    line(m.id, QPointF(measureX + width - 5, row + 3),
+                    line(m.id, QPointF(measureX + width - 5, top),
                          QPointF(measureX + width - 5, bottom), v.track);
                 }
                 if (m.repeatStart)
                 {
-                    line(m.id, QPointF(measureX + 4, row + 3), QPointF(measureX + 4, bottom),
-                         v.track);
-                    dot(m.id, QPointF(measureX + 10, row + 20), v.track);
-                    dot(m.id, QPointF(measureX + 10, row + 30), v.track);
+                    line(m.id, QPointF(measureX + 4, top), QPointF(measureX + 4, bottom), v.track);
+                    dot(m.id, QPointF(measureX + 10, middle - 5), v.track);
+                    dot(m.id, QPointF(measureX + 10, middle + 5), v.track);
                 }
                 if (m.repeatEnd)
                 {
-                    line(m.id, QPointF(measureX + width - 4, row + 3),
+                    line(m.id, QPointF(measureX + width - 4, top),
                          QPointF(measureX + width - 4, bottom), v.track);
-                    dot(m.id, QPointF(measureX + width - 10, row + 20), v.track);
-                    dot(m.id, QPointF(measureX + width - 10, row + 30), v.track);
+                    dot(m.id, QPointF(measureX + width - 10, middle - 5), v.track);
+                    dot(m.id, QPointF(measureX + width - 10, middle + 5), v.track);
                 }
             }
             for (const auto &e : m.events)
@@ -563,7 +612,8 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                 if (!system.rowTop.contains(e.track))
                     continue;
                 qreal row = system.rowTop[e.track];
-                qreal x = measureX + metrics[mi].x.value(timeOf(e), 24) * measureScale;
+                qreal x =
+                    measureX + metrics[mi].x.value(timeOf(e), 24) * measureScale + centerShift;
                 if (e.grace && e.graceAfter)
                     x += 46 * (++afterGraceIndex[e.track][e.tick]);
                 else if (e.grace)
@@ -586,8 +636,10 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                                     : 1;
                     for (int r = 0; r < count; ++r)
                     {
-                        text(e.id, "0", QRectF(x - 15 + r * 26, baseline, 30, 34), 26, e.track,
-                             true);
+                        text(e.id, "0",
+                             QRectF(x - 15 + r * 26, baseline, 30, std::max(34.0, noteSize * 1.35)),
+                             noteSize, e.track, style.noteBold);
+                        out.items.last().fontFamily = style.numberFont;
                         qreal remaining = restTicks(e) - r * 480;
                         if (e.denominator == 0 && remaining < 480)
                         {

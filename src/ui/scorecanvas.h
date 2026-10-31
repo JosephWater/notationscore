@@ -51,17 +51,19 @@ class ScoreCanvas final : public QWidget
     ScoreSnapshot m_score;
     LayoutResult m_layout;
     QStringList m_selection;
-    QString m_anchor;
     int m_track = 0;
     qreal m_zoom = 1;
     int m_denominator = 4;
     int m_dots = 0;
-    bool m_input = false;
+    qint64 m_lastInputTick = -1;
+    int m_lastInputTrack = -1;
+    QString m_lastInputNoteId;
     bool m_keyboardInput = false;
     bool m_dragging = false;
     QPointF m_dragStart;
     QPointF m_dragEnd;
     void refresh();
-    void rangeSelect(const HitRegion &hit);
+    bool editLastSuffix(QChar suffix);
+    void advanceInput(qint64 tick, int track);
 };
 } // namespace jianpu

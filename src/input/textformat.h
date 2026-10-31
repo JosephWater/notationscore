@@ -7,6 +7,15 @@
 
 namespace jianpu
 {
+struct SourceChange
+{
+    int offset = 0, removed = 0, added = 0;
+};
+struct SourceChanges
+{
+    QString before;
+    QVector<SourceChange> edits;
+};
 struct InputDiagnostic
 {
     int offset = 0, length = 1, line = 1, column = 1;

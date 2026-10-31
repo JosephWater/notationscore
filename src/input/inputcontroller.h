@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
+#include "input/textformat.h"
 #include <QObject>
 #include <QTimer>
 class QDockWidget;
 class QLineEdit;
+class QLabel;
 class QMainWindow;
 namespace jianpu
 {
@@ -31,6 +33,7 @@ class InputController final : public QObject
     SourceEditor *m_editor;
     QDockWidget *m_dock;
     QLineEdit *m_inline;
+    QLabel *m_context;
     QTimer m_timer;
     bool m_refreshing = false, m_music = false, m_seenQ = false, m_sourceMode = true,
          m_composing = false;
@@ -40,6 +43,8 @@ class InputController final : public QObject
     QString m_lyricBase;
     int m_voice = 1, m_inlineStart = -1;
     QString m_inlinePrefix, m_lastGood;
+    QString m_observedSource;
+    SourceChanges m_sourceChanges;
     void refresh();
     void commit();
     void command(int key);

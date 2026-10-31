@@ -165,6 +165,7 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
     QMap<int, int> lastSegment, verses;
     QMap<int, QVector<Key>> segmentRows;
     QMap<Key, int> sourceRows;
+    QMap<int, bool> numberedMusic, numberedLyrics;
     for (const auto &line : p.source.split('\n'))
     {
         auto field = QRegularExpression("^\\s*([QC])(\\d*)\\s*[:：]\\s*(.*)$").match(line);
@@ -177,6 +178,7 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
         int selected = field.captured(2).isEmpty() ? voice : field.captured(2).toInt();
         if (field.captured(1) == "C")
         {
+            numberedLyrics[selected] |= !field.captured(2).isEmpty();
             int seg = lastSegment.value(selected);
             int verse = verses[seg]++;
             QStringList expected;
@@ -198,6 +200,7 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
             continue;
         }
         voice = selected;
+        numberedMusic[voice] |= !field.captured(2).isEmpty();
         ++segment;
         lastSegment[voice] = segment;
         int previousEnd = offset + field.capturedStart(3);
@@ -270,7 +273,12 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
     QStringList output = headers;
     for (auto it = rows.begin(); it != rows.end(); ++it)
     {
-        auto suffix = p.voiceNames.size() == 1 ? QString() : QString::number(it.key().second);
+        auto suffix = p.voiceNames.size() > 1 || numberedMusic.value(it.key().second)
+                          ? QString::number(it.key().second)
+                          : QString();
+        auto lyricSuffix = p.voiceNames.size() > 1 || numberedLyrics.value(it.key().second)
+                               ? QString::number(it.key().second)
+                               : QString();
         output << "Q" + suffix + ": " + it->music.trimmed();
         for (int verse = 0; verse < it->verses; ++verse)
         {
@@ -284,7 +292,7 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
                         keep = words.size();
                 }
             words = words.mid(0, keep);
-            output << "C" + suffix + ": " + words.join(" ");
+            output << "C" + lyricSuffix + ": " + words.join(" ");
         }
     }
     return output.join('\n') + (p.source.endsWith('\n') ? "\n" : "");

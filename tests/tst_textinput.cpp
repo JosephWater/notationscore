@@ -15,6 +15,7 @@
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QJsonArray>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QPainter>
@@ -26,6 +27,331 @@ class TextInputTest : public QObject
 {
     Q_OBJECT
   private slots:
+    void repeatPitchInsertionKeepsBothVerses()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText(QStringLiteral("Q: 1 1 1 1 |\nC1: 春夏秋冬\nC1: 一二三四\n"));
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 4);
+        auto parsed = FanqieFormat().parse(w.document()->sourceText());
+        auto cursor = editor->textCursor();
+        cursor.setPosition(parsed.notes[1].offset);
+        editor->setTextCursor(cursor);
+        editor->insertPlainText("1 ");
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 5);
+        auto check = [&](ScoreDocument *d)
+        {
+            QCOMPARE(d->sourceText().count("C1:"), 2);
+            auto p = FanqieFormat().parse(d->sourceText());
+            QCOMPARE(p.notes.size(), 5);
+            QCOMPARE(p.notes[0].lyrics.value(0), QStringLiteral("春"));
+            QVERIFY(p.notes[1].lyrics.isEmpty());
+            QCOMPARE(p.notes[2].lyrics.value(0), QStringLiteral("夏"));
+            QCOMPARE(p.notes[4].lyrics.value(0), QStringLiteral("冬"));
+            QCOMPARE(p.notes[2].lyrics.value(1), QStringLiteral("二"));
+            QCOMPARE(p.notes[4].lyrics.value(1), QStringLiteral("四"));
+            QVERIFY(!d->inputState().value("hasErrors").toBool());
+        };
+        check(w.document());
+        w.document()->undo();
+        QCOMPARE(w.document()->snapshot().noteCount(), 4);
+        w.document()->redo();
+        check(w.document());
+        QTemporaryDir dir;
+        QVERIFY(w.document()->save(dir.filePath("repeated.jianpu")));
+        ScoreDocument reopened;
+        QVERIFY(reopened.open(dir.filePath("repeated.jianpu")));
+        check(&reopened);
+    }
+    void insertionAcrossAutoBarsKeepsLyricOwners()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText(QStringLiteral("Q: 1 1 1 1 1 1 1 1\nC: 春夏秋冬山水天地\n"));
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 8);
+        auto parsed = FanqieFormat().parse(w.document()->sourceText());
+        auto cursor = editor->textCursor();
+        cursor.setPosition(parsed.notes[3].offset);
+        editor->setTextCursor(cursor);
+        editor->insertPlainText("1/ ");
+        QTRY_VERIFY(w.document()->snapshot().noteCount() > 8);
+        parsed = FanqieFormat().parse(w.document()->sourceText());
+        QVector<TextNote> primary;
+        for (const auto &n : parsed.notes)
+            if (!n.tieBack && n.degree != 0 && n.degree != 8)
+                primary << n;
+        QCOMPARE(primary.size(), 9);
+        QVERIFY(primary[3].lyrics.isEmpty());
+        QCOMPARE(primary[4].lyrics.value(0), QStringLiteral("冬"));
+        QString words;
+        for (const auto &n : primary)
+            words += n.lyrics.value(0);
+        QCOMPARE(words, QStringLiteral("春夏秋冬山水天地"));
+        QVERIFY2(!w.document()->inputState().value("hasErrors").toBool(),
+                 qPrintable(w.document()->inputMessages().join('\n')));
+    }
+    void clickedMiddleOverwritesAndEndAppends()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText(QStringLiteral("Q: 1 2 3 4 | 5 6 7 1 |\nC: 春夏秋冬山水天地\n"));
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 8);
+        w.canvas()->setZoom(0.65);
+        // Start in append mode, then click the middle: the click must override that mode.
+        editor->setFocus();
+        QTest::keyClick(editor, Qt::Key_F6);
+        const auto s = w.document()->snapshot();
+        auto id = s.measures[0].events[1].notes[0].id;
+        QPointF point;
+        for (const auto &hit : w.canvas()->layoutResult().hits)
+            if (hit.id == id)
+                point = hit.rect.center() * w.canvas()->zoom();
+        QTest::mouseClick(w.canvas(), Qt::LeftButton, Qt::NoModifier, point.toPoint());
+        QTest::keyClicks(w.canvas(), "67");
+        auto after = w.document()->snapshot();
+        QCOMPARE(after.noteCount(), 8);
+        QCOMPARE(after.measures[0].events[1].notes[0].midi, 69);
+        QCOMPARE(after.measures[0].events[2].notes[0].midi, 71);
+        QCOMPARE(after.measures[0].events[1].lyrics[0].text, QStringLiteral("夏"));
+        QCOMPARE(after.measures[0].events[2].lyrics[0].text, QStringLiteral("秋"));
+        QTest::keyClick(w.canvas(), Qt::Key_Slash);
+        after = w.document()->snapshot();
+        QCOMPARE(after.measures[0].events[2].denominator, 8);
+        bool winter = false;
+        for (const auto &e : after.measures[0].events)
+            winter |=
+                e.tick == 1440 && !e.lyrics.isEmpty() && e.lyrics[0].text == QStringLiteral("冬");
+        QVERIFY(winter);
+        QTest::keyClick(w.canvas(), Qt::Key_End);
+        QTest::keyClick(w.canvas(), Qt::Key_5);
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 9);
+        QVERIFY(!w.document()->inputState().value("hasErrors").toBool());
+    }
+    void overwriteRestHiddenRestAndRhythm()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText("Q: 1 2 3 4 |\n");
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 4);
+        auto hit = w.canvas()->layoutResult().hits.first();
+        QTest::mouseClick(w.canvas(), Qt::LeftButton, Qt::NoModifier,
+                          (hit.rect.center() * w.canvas()->zoom()).toPoint());
+        QTest::keyClick(w.canvas(), Qt::Key_N);
+        QCOMPARE(w.canvas()->cursor().shape(), Qt::ArrowCursor);
+        QTest::keyClicks(w.canvas(), "089");
+        auto s = w.document()->snapshot();
+        QCOMPARE(s.measures[0].events.size(), 4);
+        QVERIFY(s.measures[0].events[0].rest && s.measures[0].events[0].visible);
+        QVERIFY(s.measures[0].events[1].rest && !s.measures[0].events[1].visible);
+        QVERIFY(s.measures[0].events[2].rhythm);
+        for (int i = 0; i < 3; ++i)
+            w.document()->undo();
+        QCOMPARE(w.document()->snapshot().noteCount(), 4);
+    }
+    void overwriteSuffixUsesOriginalNoteAndNextPosition()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText("Q: 1 2 3 4 |\n");
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 4);
+        auto s = w.document()->snapshot();
+        auto id = s.measures[0].events[1].notes[0].id;
+        QPointF point;
+        for (const auto &hit : w.canvas()->layoutResult().hits)
+            if (hit.id == id)
+                point = hit.rect.center() * w.canvas()->zoom();
+        QTest::mouseClick(w.canvas(), Qt::LeftButton, Qt::NoModifier, point.toPoint());
+        QTest::keyClicks(w.canvas(), "6-7");
+        s = w.document()->snapshot();
+        QCOMPARE(s.noteCount(), 3);
+        QCOMPARE(s.measures[0].events[0].notes[0].midi, 60);
+        QCOMPARE(s.measures[0].events[1].denominator, 2);
+        QCOMPARE(s.measures[0].events.last().tick, qint64(1440));
+        QCOMPARE(s.measures[0].events.last().notes[0].midi, 71);
+
+        editor->setPlainText("Q: 1 2 3 4 |\n");
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 4);
+        s = w.document()->snapshot();
+        id = s.measures[0].events[0].notes[0].id;
+        QVERIFY(w.document()->edit({EditRequest::Kind::AddChordNote, {id}, 67}));
+        s = w.document()->snapshot();
+        for (const auto &note : s.measures[0].events[0].notes)
+            if (note.midi == 67)
+                id = note.id;
+        for (const auto &hit : w.canvas()->layoutResult().hits)
+            if (hit.id == id)
+                point = hit.rect.center() * w.canvas()->zoom();
+        QTest::mouseClick(w.canvas(), Qt::LeftButton, Qt::NoModifier, point.toPoint());
+        QTest::keyClicks(w.canvas(), "6'");
+        s = w.document()->snapshot();
+        QSet<int> pitches;
+        for (const auto &note : s.measures[0].events[0].notes)
+            pitches.insert(note.midi);
+        QCOMPARE(pitches, (QSet<int>{60, 81}));
+    }
+    void keyboardLyricsSkipTiedContinuations()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText("Q: 1 2--- |\nQ: 3 4 |\n");
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 5);
+        w.canvas()->setFocus();
+        QTest::keyClick(w.canvas(), Qt::Key_C);
+        auto *input = w.findChild<QLineEdit *>("keyboardTextInput");
+        QVERIFY(input->isVisible());
+        QInputMethodEvent ime;
+        ime.setCommitString(QStringLiteral("春夏秋冬"));
+        QApplication::sendEvent(input, &ime);
+        QTest::keyClick(input, Qt::Key_Return);
+        QString words;
+        for (const auto &measure : w.document()->snapshot().measures)
+            for (const auto &event : measure.events)
+                if (!event.lyrics.isEmpty())
+                    words += event.lyrics[0].text;
+        QCOMPARE(words, QStringLiteral("春夏秋冬"));
+        QVERIFY2(!w.document()->inputState().value("hasErrors").toBool(),
+                 qPrintable(w.document()->inputMessages().join('\n')));
+    }
+    void overwriteTiedPitchKeepsLyricsAndSkipsContinuation()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText(QStringLiteral("Q: 1 2--- 3\nC1: 春夏秋\nC1: 一二三\n"));
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 4);
+        auto s = w.document()->snapshot();
+        auto id = s.measures[0].events[1].notes[0].id;
+        QPointF point;
+        for (const auto &hit : w.canvas()->layoutResult().hits)
+            if (hit.id == id)
+                point = hit.rect.center() * w.canvas()->zoom();
+        QTest::mouseClick(w.canvas(), Qt::LeftButton, Qt::NoModifier, point.toPoint());
+        QTest::keyClicks(w.canvas(), "67");
+        s = w.document()->snapshot();
+        QString words;
+        int tied = 0;
+        for (const auto &measure : s.measures)
+            for (const auto &event : measure.events)
+            {
+                if (!event.lyrics.isEmpty())
+                    words += event.lyrics[0].text;
+                for (const auto &note : event.notes)
+                    if (note.tieStart || note.tieEnd)
+                    {
+                        QCOMPARE(note.midi, 69);
+                        ++tied;
+                    }
+            }
+        QCOMPARE(tied, 2);
+        QCOMPARE(words, QStringLiteral("春夏秋"));
+        auto p = FanqieFormat().parse(w.document()->sourceText());
+        QVERIFY2(!p.hasErrors(), qPrintable(p.messages().join('\n')));
+        QVERIFY(!w.document()->sourceText().contains("^^"));
+        QCOMPARE(p.notes.last().degree, 7);
+        QVERIFY(!w.document()->inputState().value("hasErrors").toBool());
+    }
+    void repeatedC1DisplaysVerseContext()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText(QStringLiteral("Q: 1 2 3 4 |\nC1: 春夏秋冬\nC1: 一二三四\n"));
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 4);
+        auto source = editor->toPlainText();
+        auto cursor = editor->textCursor();
+        cursor.setPosition(source.lastIndexOf("C1:") + 4);
+        editor->setTextCursor(cursor);
+        auto *context = w.findChild<QLabel *>("lyricContext");
+        QVERIFY(context);
+        QVERIFY(context->text().contains(QStringLiteral("第 1 声部")));
+        QVERIFY(context->text().contains(QStringLiteral("第 2 段")));
+        QCOMPARE(w.document()->sourceText().count("C1:"), 2);
+    }
+    void durationOverwriteKeepsOtherVoiceLyrics()
+    {
+        MainWindow w;
+        w.setConfirmClose(false);
+        w.show();
+        auto *editor = w.findChild<SourceEditor *>();
+        editor->setPlainText(QStringLiteral("Q1: 1 2 3 4 |\nC1: 春夏秋冬\n"
+                                            "Q2: 5 6 7 1 |\nC2: 山水天地\n"));
+        QTRY_COMPARE(w.document()->snapshot().noteCount(), 8);
+        auto hit = w.canvas()->layoutResult().hits.first();
+        QTest::mouseClick(w.canvas(), Qt::LeftButton, Qt::NoModifier,
+                          (hit.rect.center() * w.canvas()->zoom()).toPoint());
+        QTest::keyClicks(w.canvas(), "5/");
+        auto p = FanqieFormat().parse(w.document()->sourceText());
+        QString words;
+        for (const auto &n : p.notes)
+            if (n.voice == 2)
+                words += n.lyrics.value(0);
+        QCOMPARE(words, QStringLiteral("山水天地"));
+        QVERIFY(w.document()->applyText(w.document()->sourceText() + "# round trip\n"));
+        words.clear();
+        for (const auto &m : w.document()->snapshot().measures)
+            for (const auto &e : m.events)
+                if (e.track == 4 && !e.lyrics.isEmpty())
+                    words += e.lyrics[0].text;
+        QCOMPARE(words, QStringLiteral("山水天地"));
+    }
+    void barlinesAlignWithInkAndContentIsCentered()
+    {
+        ScoreDocument d;
+        QVERIFY(d.newScore());
+        QVERIFY(
+            d.applyText(QStringLiteral("Q: 1' 2 3, 4 | 5 6' 7 1, |\nC: 春夏秋冬，山水天地。\n")));
+        for (const auto &preset : {"classic", "modern", "children"})
+        {
+            auto layout =
+                JianpuLayout().layout(d.snapshot(), {{"layout", LayoutSettings::defaults(preset)}});
+            qreal left = layout.systems.first().bounds.left();
+            for (const auto &measure : d.snapshot().measures)
+            {
+                QRectF bar, ink;
+                QSet<QString> ids;
+                for (const auto &e : measure.events)
+                    for (const auto &n : e.notes)
+                        ids.insert(n.id);
+                for (const auto &item : layout.items)
+                {
+                    if (item.id == measure.id && item.kind == LayoutItem::Kind::Line &&
+                        item.bounds.height() > 0 && qAbs(item.bounds.width()) < 0.01)
+                        bar = item.bounds;
+                    if (!ids.contains(item.id) || item.kind != LayoutItem::Kind::Text)
+                        continue;
+                    QFont font(item.fontFamily);
+                    font.setPixelSize(qRound(item.fontSize));
+                    font.setBold(item.bold);
+                    QFontMetricsF fm(font);
+                    auto glyph = fm.tightBoundingRect(item.text);
+                    qreal baseline =
+                        item.bounds.top() + (item.bounds.height() - fm.height()) / 2 + fm.ascent();
+                    glyph.translate(item.bounds.center().x() - fm.horizontalAdvance(item.text) / 2,
+                                    baseline);
+                    ink = ink.isEmpty() ? glyph : ink.united(glyph);
+                }
+                QVERIFY(!bar.isEmpty() || bar.height() > 0);
+                QVERIFY(!ink.isEmpty());
+                QVERIFY2(qAbs(bar.center().y() - ink.center().y()) < 1.1, preset);
+                QVERIFY2(qAbs((ink.left() - left) - (bar.left() - ink.right())) < 1.1, preset);
+                left = bar.left();
+            }
+        }
+    }
     void panelsCanBeReopenedFromView()
     {
         MainWindow w;

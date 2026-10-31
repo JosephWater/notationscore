@@ -16,7 +16,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QMouseEvent>
 #include <QRegularExpression>
+#include <QScopedValueRollback>
 #include <QScrollArea>
 #include <QTextBlock>
 #include <QTextBoundaryFinder>
@@ -95,7 +97,26 @@ InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *
         new QLabel(tr("F6 切换输入模式 · Esc 返回命令\nCtrl+空格 补全字段 · 修改后自动更新谱面"));
     hint->setWordWrap(true);
     layout->addWidget(hint);
+    m_context = new QLabel(tr("C1 的 1 表示声部；同一曲行的多个 C1 依次为第 1、2… 段歌词。"));
+    m_context->setObjectName("lyricContext");
+    m_context->setWordWrap(true);
+    layout->addWidget(m_context);
     m_editor = new SourceEditor;
+    connect(m_editor->document(), &QTextDocument::contentsChange, this,
+            [this](int position, int removed, int added)
+            {
+                auto source = m_editor->toPlainText();
+                if (!m_refreshing)
+                {
+                    if (m_sourceChanges.edits.isEmpty())
+                        m_sourceChanges.before = m_document->sourceText();
+                    m_sourceChanges.edits << SourceChange{
+                        position,
+                        std::min(removed, std::max(0, int(m_observedSource.size()) - position)),
+                        std::min(added, std::max(0, int(source.size()) - position))};
+                }
+                m_observedSource = source;
+            });
     layout->addWidget(m_editor);
     m_editor->setMinimumWidth(330);
     m_inline = new QLineEdit;
@@ -125,6 +146,7 @@ InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *
             [this]
             {
                 m_timer.stop();
+                m_sourceChanges = {};
                 m_music = false;
                 m_seenQ = false;
                 m_voice = 1;
@@ -236,7 +258,10 @@ void InputController::commit()
     }
     auto source = m_editor->toPlainText();
     if (source == m_document->sourceText())
+    {
+        m_sourceChanges = {};
         return;
+    }
     QString mergeKey;
     // Coalesce a directly entered note and its suffixes; paste and edits in the middle are
     // independent.
@@ -249,7 +274,9 @@ void InputController::commit()
                 mergeKey = QString("note:%1:%2").arg(n.voice).arg(n.offset);
     }
     m_refreshing = true;
-    bool ok = m_document->applyText(source, mergeKey);
+    auto changes = m_sourceChanges;
+    m_sourceChanges = {};
+    bool ok = m_document->applyText(source, mergeKey, changes);
     m_refreshing = false;
     if (!ok)
     {
@@ -316,9 +343,28 @@ void InputController::sourceSelection()
     if (m_refreshing)
         return;
     int pos = m_editor->textCursor().position();
+    auto source = m_editor->toPlainText();
+    bool lyricContext = false;
+    for (const auto &line : lyricLines(source))
+    {
+        int start = source.lastIndexOf('\n', std::max(0, line.end - 1)) + 1;
+        if (pos >= start && pos <= line.end)
+        {
+            m_context->setText(
+                tr("当前：第 %1 声部 · 第 %2 段歌词。C%1 表示声部，重复字段按段次排列。")
+                    .arg(line.voice)
+                    .arg(line.verse + 1));
+            lyricContext = true;
+            break;
+        }
+    }
+    if (!lyricContext)
+        m_context->setText(
+            tr("点击谱面后依次覆盖；End 在末尾追加。C1 表示声部，多行 C1 依次对应多段歌词。"));
     auto state = m_document->inputState();
     state["cursor"] = pos;
     m_document->setInputState(state);
+    QScopedValueRollback<bool> selectingFromSource(m_refreshing, true);
     for (const auto &m : m_canvas->score().measures)
         for (const auto &e : m.events)
             if (e.sourceStart >= 0 && pos >= e.sourceStart && pos <= e.sourceStart + e.sourceLength)
@@ -343,6 +389,8 @@ void InputController::appendMusic(const QString &text)
     if (!text.isEmpty() && text[0].isDigit())
         flush();
     auto source = m_editor->toPlainText();
+    const auto previousSource = source;
+    int editPosition = -1, removed = 0;
     QRegularExpression field("^\\s*Q(\\d*)\\s*[:：]");
     int offset = 0, target = -1, length = 0, current = 1;
     for (const auto &line : source.split('\n'))
@@ -373,7 +421,11 @@ void InputController::appendMusic(const QString &text)
             auto line = source.mid(target, length);
             auto match = field.match(line);
             if (length > match.capturedLength())
+            {
+                editPosition = target + length - 1;
+                removed = 1;
                 source.remove(target + length - 1, 1);
+            }
         }
     }
     else
@@ -392,7 +444,20 @@ void InputController::appendMusic(const QString &text)
                     insertAt = note.offset + note.length;
         }
         source.insert(insertAt, text);
+        editPosition = insertAt;
         length = insertAt - target;
+    }
+    if (source != previousSource)
+    {
+        if (m_sourceChanges.edits.isEmpty())
+            m_sourceChanges.before = m_document->sourceText();
+        // A newly created Q field and its first note are one append operation.
+        if (source.size() - previousSource.size() != int(text.size()) - removed)
+            m_sourceChanges.edits << SourceChange{int(previousSource.size()), 0,
+                                                  int(source.size() - previousSource.size())};
+        else if (editPosition >= 0)
+            m_sourceChanges.edits << SourceChange{editPosition, removed,
+                                                  removed ? 0 : int(text.size())};
     }
     m_refreshing = true;
     m_editor->setPlainText(source);
@@ -437,7 +502,7 @@ void InputController::updateInline()
         QMap<int, int> currentSegment;
         int segment = 0, current = 1, offset = 0;
         for (const auto &n : parsed.notes)
-            if (n.voice == m_voice && n.degree != 0 && n.degree != 8)
+            if (n.voice == m_voice && n.degree != 0 && n.degree != 8 && !n.tieBack)
                 ++counts[n.segment];
         for (const auto &line : m_lyricBase.split('\n'))
         {
@@ -667,6 +732,15 @@ void InputController::command(int key)
 }
 bool InputController::eventFilter(QObject *obj, QEvent *event)
 {
+    if (obj == m_canvas && event->type() == QEvent::MouseButtonPress &&
+        static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton)
+    {
+        flush();
+        m_music = false;
+        m_sourceMode = false;
+        m_document->sealInputGroup();
+        m_canvas->setKeyboardInput(false);
+    }
     if ((obj == m_editor || obj == m_inline) && event->type() == QEvent::InputMethod)
     {
         auto *e = static_cast<QInputMethodEvent *>(event);
@@ -757,6 +831,17 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
     }
     if (e->modifiers() & Qt::AltModifier)
         return false;
+    if (e->key() == Qt::Key_N)
+        return true;
+    if (e->key() == Qt::Key_End)
+    {
+        flush();
+        m_music = true;
+        m_sourceMode = false;
+        m_voice = voiceNumber();
+        m_canvas->setKeyboardInput(true);
+        return true;
+    }
     if (m_music && !e->text().isEmpty() && e->text()[0].isLetter())
     {
         auto source = m_editor->toPlainText();

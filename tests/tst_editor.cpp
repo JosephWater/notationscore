@@ -52,7 +52,10 @@ class EditorTest : public QObject
                 voice << &h;
         QTest::mouseClick(&canvas, Qt::LeftButton, Qt::ShiftModifier,
                           (voice[3]->rect.center() * canvas.zoom()).toPoint());
-        QCOMPARE(canvas.selection().size(), 4);
+        QCOMPARE(canvas.selection(), QStringList{voice[3]->id});
+        QTest::mouseClick(&canvas, Qt::LeftButton, Qt::ControlModifier,
+                          (voice[0]->rect.center() * canvas.zoom()).toPoint());
+        QCOMPARE(canvas.selection().size(), 2);
     }
     void restReplacementKeepsSelection()
     {
@@ -65,6 +68,7 @@ class EditorTest : public QObject
         QTest::keyClick(&canvas, Qt::Key_1);
         QCOMPARE(d.snapshot().noteCount(), 1);
         QVERIFY(!canvas.selection().isEmpty());
+        QTest::keyClick(&canvas, Qt::Key_Left);
         QTest::keyClick(&canvas, Qt::Key_Up);
         QCOMPARE(d.snapshot().measures[0].events[0].notes[0].midi, 62);
     }
