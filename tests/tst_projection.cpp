@@ -164,11 +164,13 @@ class ProjectionTest : public QObject
         QPoint origin = (before.center() * c->zoom()).toPoint();
         QTest::mousePress(c, Qt::LeftButton, Qt::NoModifier, origin);
         QCOMPARE(c->selection(), QStringList{"@title:0"});
-        QTest::mouseMove(c, origin + QPoint(14, 7));
+        QMouseEvent move(QEvent::MouseMove, origin + QPoint(14, 7), origin + QPoint(14, 7),
+                         Qt::NoButton, Qt::LeftButton, Qt::AltModifier);
+        QApplication::sendEvent(c, &move);
         QTest::mouseRelease(c, Qt::LeftButton, Qt::NoModifier, origin + QPoint(14, 7));
         auto moved = c->layoutResult().elements.value("@title:0")->bounds(c->layoutResult());
         QVERIFY(QLineF(moved.center(), before.center() + QPointF(20, 10)).length() < 0.1);
-        QTest::keyClick(c, Qt::Key_Right);
+        QTest::keyClick(c, Qt::Key_Right, Qt::AltModifier);
         auto nudged = c->layoutResult().elements.value("@title:0")->bounds(c->layoutResult());
         QCOMPARE(nudged, moved.translated(1, 0));
         w.document()->undo();

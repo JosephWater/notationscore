@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "inputcontroller.h"
 #include "core/scoredocument.h"
+#include "input/lyricsourcemap.h"
 #include "ui/scorecanvas.h"
 #include "ui/sourceeditor.h"
 #include <QAction>
@@ -159,14 +160,35 @@ InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *
     connect(m_canvas, &ScoreCanvas::selectionChanged, this,
             [this]
             {
-                if (m_refreshing || m_editor->hasFocus() || m_timer.isActive())
+                if (m_refreshing || m_editor->hasFocus() || m_timer.isActive() ||
+                    m_editor->toPlainText() != m_document->sourceText())
                     return;
+                if (auto *slot = m_canvas->selectedLyric())
+                {
+                    auto parsed = m_document->textSnapshot();
+                    int voice = voiceNumber();
+                    for (const auto &range : LyricSourceMap::ranges(parsed))
+                        if (range.voice == voice && range.verse == slot->verse &&
+                            range.position == slot->position)
+                        {
+                            QScopedValueRollback<bool> guard(m_refreshing, true);
+                            auto cursor = m_editor->textCursor();
+                            cursor.setPosition(range.offset);
+                            cursor.setPosition(range.offset + range.length,
+                                               QTextCursor::KeepAnchor);
+                            m_editor->setTextCursor(cursor);
+                            m_editor->ensureCursorVisible();
+                            return;
+                        }
+                }
+                const auto selected = m_canvas->modelSelection();
+                QSet<QString> selectedIds(selected.begin(), selected.end());
                 for (const auto &measure : m_canvas->score().measures)
                     for (const auto &event : measure.events)
                     {
-                        bool selected = m_canvas->modelSelection().contains(event.id);
+                        bool selected = selectedIds.contains(event.id);
                         for (const auto &n : event.notes)
-                            selected |= m_canvas->modelSelection().contains(n.id);
+                            selected |= selectedIds.contains(n.id);
                         if (selected && event.sourceStart >= 0)
                         {
                             m_refreshing = true;
@@ -254,7 +276,8 @@ void InputController::commit()
         return;
     }
     auto source = m_editor->toPlainText();
-    if (source == m_document->sourceText())
+    if (source == m_document->sourceText() && (!m_document->inputState().contains("draftSource") ||
+                                               m_document->analyzeText(source).hasErrors()))
     {
         m_sourceChanges = {};
         return;
@@ -341,6 +364,23 @@ void InputController::sourceSelection()
     if (!m_editor->hasFocus())
         return;
     QScopedValueRollback<bool> selectingFromSource(m_refreshing, true);
+    const auto parsed = m_document->textSnapshot();
+    auto voices = parsed.voiceNames.keys();
+    QVector<int> tracks;
+    for (const auto &voice : m_canvas->score().voices)
+        if (!voice.percussion)
+            tracks << voice.track;
+    for (const auto &range : LyricSourceMap::ranges(parsed))
+        if (pos >= range.offset &&
+            (range.length == 0 ? pos == range.offset : pos < range.offset + range.length))
+            for (const auto &slot : m_canvas->layoutResult().lyrics)
+                if (slot.track == tracks.value(voices.indexOf(range.voice)) &&
+                    slot.verse == range.verse && slot.position == range.position &&
+                    !slot.eventId.isEmpty())
+                {
+                    m_canvas->selectId(slot.id);
+                    return;
+                }
     for (const auto &m : m_canvas->score().measures)
         for (const auto &e : m.events)
             if (e.sourceStart >= 0 && pos >= e.sourceStart && pos <= e.sourceStart + e.sourceLength)
@@ -370,111 +410,11 @@ void InputController::appendMusic(const QString &text)
 }
 void InputController::startLyrics()
 {
-    m_dock->show();
-    m_dock->raise();
-    m_annotation = false;
     flush();
-    m_voice = voiceNumber();
-    m_lyricBase = m_editor->toPlainText();
-    m_globalLyrics = true;
-    auto parsed = FanqieFormat().parse(m_lyricBase);
-    m_lyricVerse = parsed.verseRows.value(m_voice);
-    for (const auto &note : parsed.notes)
-        if (note.voice == m_voice)
-            for (auto it = note.lyrics.begin(); it != note.lyrics.end(); ++it)
-                m_lyricVerse = std::max(m_lyricVerse, it.key() + 1);
-    m_inline->clear();
-    m_inline->setPlaceholderText(
-        tr("第 %1 段，从曲首填词；@ 跳音，~ 合字，Enter 完成").arg(m_lyricVerse + 1));
-    updateInline();
-    flush();
-    m_inline->show();
-    m_inline->setFocus();
-    m_canvas->setKeyboardInput(false);
+    m_canvas->startLyrics();
 }
 void InputController::updateInline()
 {
-    if (m_globalLyrics && !m_annotation)
-    {
-        auto parsed = FanqieFormat().parse(m_lyricBase);
-        auto words = FanqieFormat::lyricTokens(m_inline->text());
-        QMap<int, int> counts, ends, verses;
-        QMap<int, int> currentSegment;
-        int segment = 0, current = 1, offset = 0;
-        for (const auto &n : parsed.notes)
-            if (n.voice == m_voice && n.degree != 0 && n.degree != 8 && !n.tieBack)
-                ++counts[n.segment];
-        for (const auto &line : m_lyricBase.split('\n'))
-        {
-            auto field = QRegularExpression("^\\s*([QC])(\\d*)\\s*[:：]").match(line);
-            if (field.hasMatch())
-            {
-                int voice = field.captured(2).isEmpty() ? current : field.captured(2).toInt();
-                if (field.captured(1) == "Q")
-                {
-                    ++segment;
-                    current = voice;
-                    currentSegment[voice] = segment;
-                    if (voice == m_voice)
-                    {
-                        ends[segment] = offset + line.size();
-                        verses[segment] = 0;
-                    }
-                }
-                else if (voice == m_voice && currentSegment.contains(voice))
-                {
-                    int s = currentSegment[voice];
-                    ends[s] = offset + line.size();
-                    ++verses[s];
-                }
-            }
-            offset += line.size() + 1;
-        }
-        struct Insert
-        {
-            int pos;
-            QString text;
-        };
-        QVector<Insert> inserts;
-        int used = 0;
-        for (auto it = ends.begin(); it != ends.end(); ++it)
-        {
-            QString value;
-            int take = std::min(counts.value(it.key()), int(words.size()) - used);
-            if (it.key() == ends.lastKey())
-                take = words.size() - used;
-            QStringList chunk;
-            for (int i = 0; i < take; ++i)
-            {
-                auto word = words[used++];
-                QStringList chars;
-                QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, word);
-                int begin = 0, end = 0;
-                while ((end = finder.toNextBoundary()) >= 0)
-                {
-                    chars << word.mid(begin, end - begin);
-                    begin = end;
-                }
-                chunk << chars.join("~");
-            }
-            while (verses[it.key()] < m_lyricVerse)
-            {
-                value += QString("\nC%1: ").arg(m_voice);
-                ++verses[it.key()];
-            }
-            value += QString("\nC%1: %2").arg(m_voice).arg(chunk.join(" "));
-            inserts << Insert{it.value(), value};
-        }
-        QString source = m_lyricBase;
-        std::sort(inserts.begin(), inserts.end(), [](auto a, auto b) { return a.pos > b.pos; });
-        for (auto i : inserts)
-            source.insert(i.pos, i.text);
-        m_refreshing = true;
-        m_editor->setPlainText(source);
-        m_refreshing = false;
-        m_timer.start();
-        return;
-    }
     auto source = m_editor->toPlainText();
     int end = source.indexOf('\n', m_inlineStart);
     if (end < 0)
@@ -651,7 +591,9 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
                 m_canvas->entryController()->selectTarget(true);
             }
             else if (fromText)
-                m_canvas->entryController()->selectTarget(m_canvas->atAppendPosition());
+                m_canvas->entryController()->selectTarget(m_canvas->selectedLyric()
+                                                              ? m_canvas->selectedLyric()->tail
+                                                              : m_canvas->atAppendPosition());
             m_canvas->setKeyboardInput(true);
         }
     }
@@ -717,6 +659,8 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         }
         return false;
     }
+    if (m_canvas->composingLyrics())
+        return false;
     if (e->key() == Qt::Key_Escape)
     {
         flush();
@@ -726,7 +670,8 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
     }
     if (e->modifiers() & Qt::ControlModifier)
     {
-        if (e->key() == Qt::Key_Up || e->key() == Qt::Key_Down)
+        if ((e->key() == Qt::Key_Up || e->key() == Qt::Key_Down) &&
+            !(e->modifiers() & Qt::AltModifier))
         {
             flush();
             auto voices = m_canvas->score().voices;
@@ -746,6 +691,8 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         return false;
     }
     if (e->modifiers() & Qt::AltModifier)
+        return false;
+    if (m_canvas->lyricSelected() && e->key() != Qt::Key_C)
         return false;
     if (e->key() == Qt::Key_N)
         return true;
@@ -768,7 +715,6 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         m_dock->show();
         m_dock->raise();
         m_annotation = true;
-        m_globalLyrics = false;
         m_inlineStart = m_editor->textCursor().position() - 1;
         m_inline->clear();
         m_inline->setPlaceholderText(tr("音符上方注释；Enter 完成"));

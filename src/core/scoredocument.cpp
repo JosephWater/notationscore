@@ -414,6 +414,13 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
         m_states = {0};
         m_cursor = 0;
         m_savedState = 0;
+        if (m_input.contains("draftSource") && !parseText(sourceText()).hasErrors())
+        {
+            // Recover a valid draft rejected by an older, overly broad protection rule.
+            // applyText validates a complete native clone before replacing music.
+            applyText(sourceText(), "restore-valid-draft");
+            m_error.clear();
+        }
         syncSourceLayout();
         notify();
         emit loaded();
@@ -473,7 +480,16 @@ bool ScoreDocument::exportFile(const QString &path)
     m_error.clear();
     if (!m_project)
         return fail(tr("没有打开的曲谱"));
-    if (m_input.value("hasErrors").toBool())
+    if (m_input.contains("draftSource") && !textSnapshot().hasErrors())
+        if (!applyText(sourceText()))
+            return false;
+    auto previousInput = m_input;
+    syncSourceLayout();
+    if (m_input != previousInput)
+        emit changed();
+    auto validation = textSnapshot();
+    if (m_input.contains("draftSource") || validation.hasErrors() ||
+        !m_input.value("pendingLyrics").toArray().isEmpty())
         return fail(tr("请先解决文字稿中的错误或待分配歌词，再导出。"));
     const auto suffix = QFileInfo(path).suffix().toLower();
     QTemporaryDir dir;
@@ -525,6 +541,7 @@ bool ScoreDocument::newScore()
     m_input = {{"format", "fanqie-1.0"},
                {"source", QStringLiteral("V: 1.0\nB: 未命名曲谱\nD: C\nP: 4/4\nQ: ")},
                {"bindings", QJsonArray()}};
+    m_input["textOrigin"] = true;
     m_imported = true;
     notify();
     return true;
@@ -553,7 +570,7 @@ bool ScoreDocument::edit(const EditRequest &request)
     }
     using K = EditRequest::Kind;
     if (items.empty() && request.kind != K::AppendMeasure && request.kind != K::SetKey &&
-        request.kind != K::SetTime && request.kind != K::AddPart)
+        request.kind != K::SetTime && request.kind != K::AddPart && request.kind != K::LyricsBatch)
         return fail(tr("请先选择音符或休止符"));
     auto *first = items.empty() ? nullptr : items.front();
     auto crFor = [](EngravingItem *item) -> ChordRest *
@@ -569,6 +586,7 @@ bool ScoreDocument::edit(const EditRequest &request)
     auto *firstCR = crFor(first);
     bool ok = true;
     QString message;
+    QStringList assignedLyrics;
     size_t before = score->undoStack()->currentIndex();
     score->deselectAll();
     if (!items.empty())
@@ -746,6 +764,9 @@ bool ScoreDocument::edit(const EditRequest &request)
             for (auto *l : firstCR->lyrics())
                 if (l->verse() == request.value)
                     lyric = l;
+            if (!request.text.isEmpty() &&
+                (!lyric || lyric->plainText().toQString() != request.text))
+                assignedLyrics << request.text;
             if (lyric)
                 lyric->undoChangeProperty(Pid::TEXT,
                                           muse::String::fromQString(request.text.toHtmlEscaped()));
@@ -756,6 +777,51 @@ bool ScoreDocument::edit(const EditRequest &request)
                 lyric->setVerse(request.value);
                 lyric->setXmlText(muse::String::fromQString(request.text.toHtmlEscaped()));
                 score->undoAddElement(lyric);
+            }
+            break;
+        }
+        case K::LyricsBatch:
+        {
+            if (request.value < 0 || request.value > 1023)
+            {
+                reject(tr("无效歌词段次"));
+                break;
+            }
+            const auto values =
+                QJsonDocument::fromJson(request.text.toUtf8()).object().value("words").toObject();
+            for (auto it = values.begin(); it != values.end(); ++it)
+            {
+                auto *obj =
+                    score->eidRegister()->itemFromEID(EID::fromStdString(it.key().toStdString()));
+                if (!obj || !obj->isChord())
+                {
+                    reject(tr("歌词对应的音符已失效"));
+                    break;
+                }
+                auto *cr = toChord(obj);
+                if (int(cr->track()) != request.secondary || cr->isGrace())
+                {
+                    reject(tr("歌词需要同一声部的主音符"));
+                    break;
+                }
+                Lyrics *lyric = nullptr;
+                for (auto *l : cr->lyrics())
+                    if (l->verse() == request.value)
+                        lyric = l;
+                auto value = it.value().toString();
+                if (!value.isEmpty() && (!lyric || lyric->plainText().toQString() != value))
+                    assignedLyrics << value;
+                if (lyric)
+                    lyric->undoChangeProperty(Pid::TEXT,
+                                              muse::String::fromQString(value.toHtmlEscaped()));
+                else if (!value.isEmpty())
+                {
+                    lyric = Factory::createLyrics(cr);
+                    lyric->setTrack(cr->track());
+                    lyric->setVerse(request.value);
+                    lyric->setXmlText(muse::String::fromQString(value.toHtmlEscaped()));
+                    score->undoAddElement(lyric);
+                }
             }
             break;
         }
@@ -1126,11 +1192,85 @@ bool ScoreDocument::edit(const EditRequest &request)
     score->endCmd(!ok);
     if (!ok)
         return fail(message);
-    if (score->undoStack()->currentIndex() != before)
+    if (score->undoStack()->currentIndex() != before || request.kind == K::LyricsBatch)
     {
+        if (!assignedLyrics.isEmpty())
+        {
+            auto pending = m_input["pendingLyrics"].toArray();
+            for (const auto &assigned : assignedLyrics)
+            {
+                bool consumed = false;
+                for (int i = 0; i < pending.size() && !consumed; ++i)
+                {
+                    auto text = pending[i].toString();
+                    if (text == assigned)
+                    {
+                        pending.removeAt(i);
+                        consumed = true;
+                    }
+                    else
+                    {
+                        auto tokens = FanqieFormat::lyricTokens(text);
+                        if (tokens.removeOne(assigned))
+                        {
+                            consumed = true;
+                            if (tokens.isEmpty())
+                                pending.removeAt(i);
+                            else
+                                pending[i] = tokens.join("");
+                        }
+                    }
+                }
+            }
+            m_input["pendingLyrics"] = pending;
+            auto overflow = m_input["overflow"].toArray();
+            for (int i = overflow.size() - 1; i >= 0; --i)
+            {
+                auto entry = overflow[i].toObject();
+                auto words = entry["words"].toArray();
+                for (const auto &assigned : assignedLyrics)
+                    for (int j = 0; j < words.size(); ++j)
+                        if (words[j].toString() == assigned)
+                        {
+                            words.removeAt(j);
+                            break;
+                        }
+                if (words.isEmpty())
+                    overflow.removeAt(i);
+                else
+                {
+                    entry["words"] = words;
+                    overflow[i] = entry;
+                }
+            }
+            m_input["overflow"] = overflow;
+        }
+        if (request.kind == K::LyricsBatch || request.kind == K::Lyrics)
+        {
+            auto rows = m_input["verseRows"].toObject();
+            int track = request.kind == K::LyricsBatch ? request.secondary
+                                                       : (firstCR ? int(firstCR->track()) : 0);
+            rows[QString::number(track)] =
+                std::max(rows[QString::number(track)].toInt(), request.value + 1);
+            m_input["verseRows"] = rows;
+        }
+        if (request.kind == K::LyricsBatch)
+        {
+            auto extra =
+                QJsonDocument::fromJson(request.text.toUtf8()).object()["pending"].toArray();
+            if (!extra.isEmpty())
+            {
+                auto pending = m_input["pendingLyrics"].toArray();
+                QString word;
+                for (auto value : extra)
+                    word += value.toString();
+                pending << word;
+                m_input["pendingLyrics"] = pending;
+            }
+        }
         syncSourceAfterEdit(sourceRequest, previousSnapshot);
         syncSourceLayout();
-        recordChange(previousState, true);
+        recordChange(previousState, score->undoStack()->currentIndex() != before);
     }
     notify();
     return true;

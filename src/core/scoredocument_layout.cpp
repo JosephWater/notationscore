@@ -17,6 +17,22 @@ void ScoreDocument::refreshPresentation()
 {
     m_presentation = std::make_unique<LayoutResult>(m_projection->layout(snapshot(), m_view));
 }
+bool ScoreDocument::transformElement(const QString &id, double rotation, double scale,
+                                     const QString &mergeKey)
+{
+    auto element = presentation().elements.value(id);
+    if (!element || !element->identity().movable)
+        return fail(tr("请选择音符和歌词以外的图形元素"));
+    auto view = m_view;
+    auto offsets = view["elementOffsets"].toObject();
+    auto value = offsets[element->identity().key].toObject();
+    value["rotation"] = std::clamp(rotation, -360.0, 360.0);
+    value["scale"] = std::clamp(scale, 0.25, 4.0);
+    offsets[element->identity().key] = value;
+    view["elementOffsets"] = offsets;
+    setViewSettings(view, mergeKey);
+    return true;
+}
 bool ScoreDocument::moveElement(const QString &id, QPointF delta, const QString &mergeKey)
 {
     auto element = presentation().elements.value(id);
@@ -26,8 +42,9 @@ bool ScoreDocument::moveElement(const QString &id, QPointF delta, const QString 
     auto offsets = view["elementOffsets"].toObject();
     auto key = element->identity().key;
     auto old = offsets.value(key).toObject();
-    offsets[key] =
-        QJsonObject{{"x", old["x"].toDouble() + delta.x()}, {"y", old["y"].toDouble() + delta.y()}};
+    old["x"] = old["x"].toDouble() + delta.x();
+    old["y"] = old["y"].toDouble() + delta.y();
+    offsets[key] = old;
     view["elementOffsets"] = offsets;
     setViewSettings(view, mergeKey);
     return true;
@@ -93,16 +110,27 @@ bool ScoreDocument::syncSourceLayoutPass()
                     if (!event.grace && event.track == b["track"].toInt() &&
                         event.position == note.position)
                     {
+                        auto oldLyrics = note.lyrics;
                         note.lyrics.clear();
                         for (const auto &lyric : event.lyrics)
                             note.lyrics[lyric.verse] = lyric.text;
+                        parsed.rewriteLyrics |= oldLyrics != note.lyrics;
                     }
             break;
         }
+    for (auto it = tracks.begin(); it != tracks.end(); ++it)
+    {
+        int count = score.lyricRows.value(it.value());
+        parsed.rewriteLyrics |= count > parsed.verseRows.value(it.key());
+        parsed.verseRows[it.key()] = std::max(count, parsed.verseRows.value(it.key()));
+    }
     auto layout = m_projection->layout(score, m_view);
     auto aligned = m_projection->align(parsed, layout);
     if (aligned == m_input["source"].toString() && m_input.contains("bindings"))
+    {
+        updateInputDiagnostics(parsed);
         return false;
+    }
     auto updated = format.parse(aligned, m_view.value("inputHabits").toObject());
     if (!updated.canProject())
         return false;
@@ -144,6 +172,11 @@ bool ScoreDocument::syncSourceLayoutPass()
     m_input["source"] = aligned;
     m_input["bindings"] = bindings;
     m_input["overflow"] = updated.overflowJson();
+    updateInputDiagnostics(updated);
+    return true;
+}
+void ScoreDocument::updateInputDiagnostics(const TextParseResult &updated)
+{
     // Reflow changes source line numbers. Recompute locations while keeping
     // lyrics detached by deletions, which intentionally have no source token.
     QStringList unassigned;
@@ -156,6 +189,5 @@ bool ScoreDocument::syncSourceLayoutPass()
         messages << tr("已删除音符的歌词待分配：%1").arg(unassigned.join(" "));
     m_input["messages"] = QJsonArray::fromStringList(messages);
     m_input["hasErrors"] = updated.hasErrors() || !unassigned.isEmpty();
-    return true;
 }
 } // namespace jianpu

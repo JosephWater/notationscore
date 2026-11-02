@@ -7,6 +7,7 @@
 #include <QHash>
 #include <QPainterPath>
 #include <QRectF>
+#include <QTransform>
 #include <memory>
 
 namespace jianpu
@@ -35,6 +36,7 @@ struct LayoutItem
     Qt::Alignment alignment = Qt::AlignCenter;
     QColor color;
     QString elementId;
+    QTransform transform;
 };
 struct HitRegion
 {
@@ -45,6 +47,22 @@ struct HitRegion
     int measure = 0;
     qint64 tick = 0;
     bool note = false;
+};
+struct LyricSlot
+{
+    QString id, eventId, text;
+    QRectF rect;
+    int track = 0, verse = 0, system = 0;
+    qint64 tick = 0;
+    bool tail = false;
+    MusicalTime position;
+};
+struct MeasureRegion
+{
+    QString id;
+    int index = 0, track = 0, system = 0;
+    qint64 tick = 0, duration = 0;
+    QRectF rect;
 };
 struct LayoutResult
 {
@@ -59,6 +77,8 @@ struct LayoutResult
     QVector<LayoutItem> items;
     QVector<HitRegion> hits;
     QVector<SystemRange> systems;
+    QVector<LyricSlot> lyrics;
+    QVector<MeasureRegion> measures;
     QHash<QString, std::shared_ptr<const VisualElement>> elements;
     QSizeF size;
     QStringList warnings;

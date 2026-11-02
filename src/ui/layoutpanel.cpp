@@ -130,6 +130,7 @@ LayoutPanel::LayoutPanel(ScoreDocument *d, QWidget *parent) : QWidget(parent), m
     number(flow, "measuresPerLine", tr("每行目标小节数"), 1, 32);
     check(flow, "sourceBreaks", tr("遵循文字曲行换行"));
     check(flow, "stretchLast", tr("末行撑满"));
+    check(flow, "showLyricNumbers", tr("多段歌词显示编号"));
     check(flow, "showVoices", tr("显示声部名称"));
     check(flow, "showMeasures", tr("显示小节号"));
     check(flow, "showPages", tr("显示页码"));

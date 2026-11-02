@@ -494,6 +494,7 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
     {
         int current = 1, offset = 0;
         bool title = false;
+        QMap<QPair<int, int>, int> lyricLocations;
         auto lines = source.split('\n');
         for (const auto &original : lines)
         {
@@ -578,6 +579,7 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
                     voice = current;
                 auto targets = p.lastSegment.value(voice);
                 int verse = p.verseCount[voice]++;
+                lyricLocations[{voice, verse}] = start;
                 p.r.verseRows[voice] = std::max(p.r.verseRows.value(voice), verse + 1);
                 if (targets.isEmpty())
                     diagnostic(p.r, start, QStringLiteral("歌词前需要对应声部的 Q: 曲行"));
@@ -613,6 +615,47 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
             else
                 diagnostic(p.r, offset, QStringLiteral("保留未支持的字段 %1").arg(field), false);
             offset += original.size() + 1;
+        }
+        // A pasted lyric line continues through following Q rows of this voice
+        // and verse. Only text beyond the whole voice remains unassigned.
+        auto excess = p.r.overflow;
+        p.r.overflow.clear();
+        p.r.pendingLyrics.clear();
+        p.r.diagnostics.erase(
+            std::remove_if(p.r.diagnostics.begin(), p.r.diagnostics.end(), [](const auto &d)
+                           { return d.category == InputDiagnostic::Category::LyricsOverflow; }),
+            p.r.diagnostics.end());
+        for (auto entry : excess)
+        {
+            auto queue = entry.words;
+            for (auto &n : p.r.notes)
+            {
+                if (n.voice != entry.voice || n.segment <= entry.segment || n.degree == 0 ||
+                    n.degree == 8 || n.tieBack || queue.isEmpty())
+                    continue;
+                auto existing = n.lyrics.value(entry.verse);
+                if (!existing.isEmpty())
+                    queue << existing;
+                auto word = queue.takeFirst();
+                if (word != "@")
+                    n.lyrics[entry.verse] = word;
+                else
+                    n.lyrics.remove(entry.verse);
+                p.r.rewriteLyrics = true;
+            }
+            if (!queue.isEmpty())
+            {
+                for (const auto &n : p.r.notes)
+                    if (n.voice == entry.voice)
+                        entry.segment = n.segment;
+                entry.words = queue;
+                p.r.overflow << entry;
+                p.r.pendingLyrics << queue.join("");
+                diagnostic(
+                    p.r, 0,
+                    QStringLiteral("%1 个歌词词位待分配：%2").arg(queue.size()).arg(queue.join("")),
+                    true, InputDiagnostic::Category::LyricsOverflow);
+            }
         }
         for (int index : p.openSpans)
             diagnostic(p.r, p.r.spans[index].offset,
@@ -1149,7 +1192,35 @@ QString FanqieFormat::token(const TextNote &n)
 }
 QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedContent) const
 {
-    bool protect = !s.marks.isEmpty();
+    bool protect = false;
+    for (const auto &mark : s.marks)
+        if (!QStringList{"dynamic", "text", "slur", "hairpin", "tuplet", "tie", "key", "minor-key",
+                         "time"}
+                 .contains(mark.kind) ||
+            ((mark.kind == "key" || mark.kind == "minor-key" || mark.kind == "time") &&
+             mark.tick != 0))
+            protect = true;
+    QMap<QString, QString> openings, closings;
+    for (const auto &mark : s.marks)
+        if (mark.kind == "slur" || mark.kind == "hairpin")
+        {
+            const EventData *first = nullptr, *last = nullptr;
+            for (const auto &measure : s.measures)
+                for (const auto &event : measure.events)
+                    if (!event.grace && event.track == mark.track)
+                    {
+                        if (event.tick == mark.tick)
+                            first = &event;
+                        if (mark.kind == "slur" ? event.tick <= mark.endTick
+                                                : event.tick + event.duration <= mark.endTick)
+                            last = &event;
+                    }
+            if (first && last)
+            {
+                openings[first->id] += mark.kind == "slur" ? "(" : mark.text;
+                closings[last->id].prepend(mark.kind == "slur" ? ")" : "!");
+            }
+        }
     QString out = "V: 1.0\nB: " + s.title + "\n";
     for (const auto &b : s.subtitles)
         out += "B: " + b + "\n";
@@ -1205,19 +1276,50 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                 if (e.track == v.track)
                     for (const auto &l : e.lyrics)
                         verseCount = std::max(verseCount, l.verse + 1);
-        for (const auto &m : s.measures)
+        auto limit = s.sourceEnds.value(
+            v.track, s.measures.isEmpty()
+                         ? MusicalTime()
+                         : MusicalTime(s.measures.last().tick + s.measures.last().duration, 1920));
+        for (int mi = 0; mi < s.measures.size(); ++mi)
         {
+            const auto &m = s.measures[mi];
+            QMap<int, int> accidentalState;
+            auto spelling = [&](const NoteData &note, int fifths, TextNote &token)
+            {
+                int key = keyAlter(note.step, fifths), absolute = note.octave * 7 + note.step;
+                int delta = note.alter - key;
+                if (note.alter == 0 && (key != 0 || accidentalState.value(absolute, key) != 0))
+                    token.accidental = 0;
+                else if (delta != 0)
+                {
+                    if (std::abs(delta) > 1)
+                        protect = true;
+                    token.accidental = delta;
+                }
+                else if (accidentalState.value(absolute, key) != note.alter)
+                {
+                    // The current grammar cannot explicitly restore an altered
+                    // key-signature pitch after a natural in the same measure.
+                    protect = true;
+                }
+                accidentalState[absolute] = note.alter;
+            };
+            if (MusicalTime(m.tick, 1920) >= limit)
+                break;
+            if (m.repeatStart && (mi == 0 || !s.measures[mi - 1].repeatEnd))
+                out += "|: ";
             MusicalTime cursor(m.tick, 1920);
             for (const auto &e : m.events)
                 if (e.track == v.track)
                 {
-                    if (e.grace || e.tuplet || e.notes.size() > 1 ||
-                        (!e.notes.isEmpty() && (e.notes[0].tieEnd || e.notes[0].tieStart)))
+                    if (e.notes.size() > 1 || e.keyFifths != s.keyFifths)
                         protect = true;
                     if (e.grace)
                         continue;
                     auto position =
                         e.length == MusicalTime() ? MusicalTime(e.tick, 1920) : e.position;
+                    if (position >= limit)
+                        continue;
                     if (position > cursor)
                     {
                         if (!activeTuplet.isEmpty())
@@ -1247,9 +1349,7 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                         n.octave = int(std::floor(relative / 7.0));
                         n.tieForward = note.tieStart;
                         n.tieBack = note.tieEnd;
-                        int delta = note.alter - keyAlter(note.step, e.keyFifths);
-                        if (delta)
-                            n.accidental = delta;
+                        spelling(note, e.keyFifths, n);
                     }
                     if (e.denominator >= 4)
                         n.slashes = int(std::log2(e.denominator)) - 2;
@@ -1273,7 +1373,44 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                                     break;
                                 }
                     }
-                    out += token(n) + " ";
+                    out += openings.value(e.id) + token(n);
+                    for (bool after : {false, true})
+                    {
+                        QString grace;
+                        for (const auto &measure : s.measures)
+                            for (const auto &g : measure.events)
+                                if (g.grace && g.track == e.track && g.tick == e.tick &&
+                                    g.graceAfter == after && !g.notes.isEmpty())
+                                {
+                                    const auto &pitch = g.notes.first();
+                                    TextNote small;
+                                    int relative =
+                                        pitch.octave * 7 + pitch.step - 28 - tonicStep(e.keyFifths);
+                                    small.degree = (relative % 7 + 7) % 7 + 1;
+                                    small.octave = int(std::floor(relative / 7.0));
+                                    spelling(pitch, e.keyFifths, small);
+                                    if (g.denominator >= 8)
+                                        small.slashes = int(std::log2(g.denominator)) - 3;
+                                    else
+                                        protect = true;
+                                    grace += token(small);
+                                }
+                        if (!grace.isEmpty())
+                            out += "[" + QString(after ? "h" : "") + grace + "]";
+                    }
+                    for (const auto &mark : s.marks)
+                        if (mark.track == e.track && mark.tick == e.tick)
+                        {
+                            if (mark.kind == "dynamic")
+                                out += "&" + mark.text;
+                            else if (mark.kind == "text")
+                            {
+                                auto text = mark.text;
+                                text.replace("\\", "\\\\").replace("\"", "\\\"");
+                                out += "\"" + text + "\"";
+                            }
+                        }
+                    out += closings.value(e.id) + " ";
                     if (!e.rest && !n.tieBack)
                     {
                         for (int verse = 0; verse < verseCount; ++verse)
@@ -1289,7 +1426,7 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                         }
                     }
                 }
-            auto end = MusicalTime(m.tick + m.duration, 1920);
+            auto end = std::min(limit, MusicalTime(m.tick + m.duration, 1920));
             if (cursor < end)
             {
                 if (!activeTuplet.isEmpty())
@@ -1299,7 +1436,13 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                 }
                 appendGap(end - cursor);
             }
-            out += (m.repeatEnd ? ":|" : m.barline == 32 ? "||" : "|") + QString(" ");
+            if (end == MusicalTime(m.tick + m.duration, 1920))
+                out += (m.repeatEnd
+                            ? (mi + 1 < s.measures.size() && s.measures[mi + 1].repeatStart ? ":|:"
+                                                                                            : ":|")
+                        : m.barline == 32 ? "||"
+                                          : "|") +
+                       QString(" ");
         }
         if (!activeTuplet.isEmpty())
             out += ") ";

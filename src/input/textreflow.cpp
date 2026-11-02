@@ -8,6 +8,37 @@
 
 namespace jianpu
 {
+QString FanqieFormat::replaceMusic(const QString &source, const QString &projection)
+{
+    if (source.isEmpty())
+        return projection;
+    static const QRegularExpression musicalField("^\\s*[QC]\\d*\\s*[:：]");
+    QStringList music, result;
+    for (const auto &line : projection.split('\n'))
+        if (musicalField.match(line).hasMatch())
+            music << line;
+    auto lines = source.split('\n');
+    int last = -1, next = 0;
+    for (int i = 0; i < lines.size(); ++i)
+        if (musicalField.match(lines[i]).hasMatch())
+            last = i;
+    if (last < 0)
+        return source + (source.endsWith('\n') ? "" : "\n") + music.join('\n') + "\n";
+    for (int i = 0; i < lines.size(); ++i)
+    {
+        if (musicalField.match(lines[i]).hasMatch())
+        {
+            if (next < music.size())
+                result << music[next++];
+            if (i == last)
+                while (next < music.size())
+                    result << music[next++];
+        }
+        else
+            result << lines[i];
+    }
+    return result.join('\n');
+}
 namespace
 {
 QString wordToken(const QString &word)
@@ -143,8 +174,8 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
         if (!b.automatic)
             explicitEnds[b.voice].insert(b.position);
     QStringList headers;
-    bool changed = std::any_of(p.boundaries.begin(), p.boundaries.end(),
-                               [](const auto &b) { return b.automatic; });
+    bool changed = p.rewriteLyrics || std::any_of(p.boundaries.begin(), p.boundaries.end(),
+                                                  [](const auto &b) { return b.automatic; });
     auto append = [](QString &music, const QString &part)
     {
         auto value = part.trimmed();
@@ -245,6 +276,7 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
                         changed = true;
                 }
                 auto &row = rows[key];
+                row.verses = std::max(row.verses, p.verseRows.value(voice));
                 append(row.music, leading);
                 append(row.music,
                        split ? token(piece) + decorations(n, pi == 0, pi + 1 == pieces.size())

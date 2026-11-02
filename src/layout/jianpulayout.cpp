@@ -188,7 +188,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
     for (const auto &v : voices)
     {
         maxChord[v.track] = 1;
-        maxVerse[v.track] = score.lyricRows.value(v.track);
+        maxVerse[v.track] = std::max(1, score.lyricRows.value(v.track));
         maxDots[v.track] = 0;
     }
     for (const auto &m : score.measures)
@@ -537,6 +537,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                      ? begin == 0
                      : writtenEnds[v.track] > MusicalTime(score.measures[begin].tick, 1920)))
                 rowVoices << v;
+        QMap<int, qreal> lyricShift;
         auto localHeights = rowHeights;
         qreal localHeight = style.preset == "classic" ? 24 : 36;
         for (const auto &v : rowVoices)
@@ -545,6 +546,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             qreal extra = MarkPlacement::belowReserve(
                 score.marks, v.track, score.measures[begin].tick,
                 score.measures[end - 1].tick + score.measures[end - 1].duration);
+            lyricShift[v.track] = extra;
             localHeights[v.track] += extra;
             localHeight += extra;
         }
@@ -593,10 +595,25 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             // rather than scaling an asymmetric empty tail after the last note.
             qreal centerShift = metrics[mi].ink.isEmpty() ? 0 : (width - inkLeft - inkRight) / 2;
             if (style.showMeasures)
-                text(m.id, QString::number(m.number), QRectF(measureX, y, 40, 20), 11);
+                text(m.id, QString::number(m.number), QRectF(measureX, y - 18, 40, 20), 11);
             for (const auto &v : rowVoices)
             {
                 qreal row = system.rowTop[v.track];
+                int originalIndex = 0;
+                for (int j = 0; j < inputScore.measures.size(); ++j)
+                    if (inputScore.measures[j].id == m.id)
+                    {
+                        originalIndex = j;
+                        break;
+                    }
+                out.measures << MeasureRegion{
+                    m.id,
+                    originalIndex,
+                    v.track,
+                    systemIndex,
+                    m.tick,
+                    m.duration,
+                    QRectF(measureX, row - 12, width, std::max(52.0, localHeights[v.track] - 4))};
                 QFontMetricsF fm(style.font(noteSize, style.noteBold, true));
                 qreal boxHeight = std::max(34.0, noteSize * 1.35);
                 qreal digitCenter = (boxHeight - fm.height()) / 2 + fm.ascent() +
@@ -734,10 +751,36 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                         line(e.id, QPointF(x + 22 + k * 15, baseline + 18),
                              QPointF(x + 32 + k * 15, baseline + 18), e.track);
                 }
+                if (!e.rest && !e.grace &&
+                    std::any_of(e.notes.begin(), e.notes.end(),
+                                [](const auto &n) { return !n.tieEnd; }))
+                    for (int verse = 0; verse < maxVerse[e.track]; ++verse)
+                    {
+                        QString word;
+                        for (const auto &l : e.lyrics)
+                            if (l.verse == verse)
+                                word = l.text;
+                        qreal ly = row + maxChord[e.track] * noteSpacing[e.track] + style.lyricGap +
+                                   lyricShift[e.track] + verse * lyricAdvance;
+                        auto id = "@lyric:" + (e.logicalId.isEmpty() ? e.id : e.logicalId) + ":" +
+                                  QString::number(verse);
+                        out.lyrics << LyricSlot{
+                            id,
+                            e.id,
+                            word,
+                            QRectF(x - std::max(12.0, lyricMetrics.horizontalAdvance(word) / 2), ly,
+                                   std::max(24.0, lyricMetrics.horizontalAdvance(word) + 6),
+                                   lyricHeight),
+                            e.track,
+                            verse,
+                            systemIndex,
+                            e.tick};
+                        out.lyrics.last().position = e.position;
+                    }
                 for (const auto &lyric : e.lyrics)
                 {
                     qreal ly = row + maxChord[e.track] * noteSpacing[e.track] + style.lyricGap +
-                               lyric.verse * lyricAdvance;
+                               lyricShift[e.track] + lyric.verse * lyricAdvance;
                     QString body = lyric.text;
                     while (!body.isEmpty() && body.back().isPunct())
                         body.chop(1);
@@ -759,6 +802,20 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             }
             measureX += width;
         }
+        if (style.showLyricNumbers)
+            for (const auto &v : rowVoices)
+                if (maxVerse[v.track] > 1)
+                    for (int verse = 0; verse < maxVerse[v.track]; ++verse)
+                    {
+                        qreal ly = system.rowTop[v.track] +
+                                   maxChord[v.track] * noteSpacing[v.track] + style.lyricGap +
+                                   lyricShift[v.track] + verse * lyricAdvance;
+                        text("@lyric-number:" + QString::number(systemIndex) + ":" +
+                                 QString::number(v.track) + ":" + QString::number(verse),
+                             QString::number(verse + 1) + ".",
+                             QRectF(system.left - 26, ly, 22, lyricHeight), lyricSize * 0.85,
+                             v.track);
+                    }
         system.right = measureX;
         out.systems.push_back(
             {MusicalTime(score.measures[begin].tick, 1920),
@@ -917,8 +974,14 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                 QPainterPath path;
                 if (mark.kind == "hairpin")
                 {
-                    cy = row + maxChord[mark.track] * noteSpacing[mark.track] + style.lyricGap +
-                         maxVerse[mark.track] * lyricAdvance + 46;
+                    bool dynamics = false;
+                    for (const auto &other : score.marks)
+                        dynamics |= other.kind == "dynamic" && other.track == mark.track &&
+                                    other.tick >= score.measures[sys.first].tick &&
+                                    other.tick < score.measures[sys.last - 1].tick +
+                                                     score.measures[sys.last - 1].duration;
+                    cy = row + maxChord[mark.track] * noteSpacing[mark.track] + 10 +
+                         (dynamics ? 22 : 0);
                     bool close = mark.text == ">";
                     path.moveTo(a, cy + (close ? -5 : 0));
                     path.lineTo(b, cy + (close ? 0 : -5));
@@ -963,10 +1026,9 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             if (!sys.rowTop.contains(mark.track))
                 continue;
             qreal x = pointAt(sys, mark.tick);
-            qreal my = MarkPlacement::labelY(
-                mark.kind, sys.rowTop[mark.track],
-                sys.rowTop[mark.track] + maxChord[mark.track] * noteSpacing[mark.track] +
-                    style.lyricGap + maxVerse[mark.track] * lyricAdvance);
+            qreal my = MarkPlacement::labelY(mark.kind, sys.rowTop[mark.track],
+                                             sys.rowTop[mark.track] +
+                                                 maxChord[mark.track] * noteSpacing[mark.track]);
             QString label = (mark.kind == "key" || mark.kind == "minor-key")
                                 ? keyLabel(mark.text.toInt(), mark.kind == "minor-key")
                                 : mark.text;
@@ -981,6 +1043,44 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             item.strokeWidth = style.lineWidth;
     out.size = QSizeF(pageWidth + 48, out.pages.last().bottom() + 24);
     VisualElementRegistry::build(out, inputScore, settings);
+    QMap<QString, QVector<int>> lyricRows;
+    for (int i = 0; i < out.lyrics.size(); ++i)
+    {
+        const auto &s = out.lyrics[i];
+        lyricRows[QString("%1:%2:%3").arg(s.system).arg(s.track).arg(s.verse)] << i;
+    }
+    for (auto indices : lyricRows)
+    {
+        std::sort(indices.begin(), indices.end(),
+                  [&](int a, int b) { return out.lyrics[a].tick < out.lyrics[b].tick; });
+        int filled = -1;
+        for (int i = 0; i < indices.size(); ++i)
+            if (!out.lyrics[indices[i]].text.isEmpty())
+                filled = i;
+        if (filled + 1 < indices.size())
+            out.lyrics[indices[filled + 1]].tail = true;
+        else if (!indices.isEmpty())
+        {
+            auto tail = out.lyrics[indices.last()];
+            tail.id = "@lyric-tail:" + QString::number(tail.system) + ":" +
+                      QString::number(tail.track) + ":" + QString::number(tail.verse);
+            tail.rect.moveLeft(tail.rect.right() + 12);
+            tail.eventId.clear();
+            tail.text.clear();
+            tail.tail = true;
+            auto anchorTick = tail.tick;
+            for (const auto &m : score.measures)
+                for (const auto &e : m.events)
+                    if (e.track == tail.track && e.tick == anchorTick)
+                    {
+                        tail.tick = anchorTick + e.duration;
+                        tail.position = e.position + e.length;
+                    }
+            out.lyrics << tail;
+        }
+    }
+    for (const auto &slot : out.lyrics)
+        out.hits << HitRegion{slot.id, {}, slot.rect, slot.track, 0, slot.tick, false};
     return out;
 }
 } // namespace jianpu

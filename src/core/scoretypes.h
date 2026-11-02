@@ -95,6 +95,7 @@ struct ScoreSnapshot
     QStringList subtitles;
     QStringList authors;
     QMap<int, int> lyricRows;
+    QMap<int, MusicalTime> sourceEnds;
     int noteCount() const
     {
         int n = 0;
@@ -116,6 +117,27 @@ struct MidiTrackInfo
     QString name;
     bool percussion = false;
 };
+enum class SelectionKind
+{
+    None,
+    Notes,
+    Lyrics,
+    Measures,
+    Graphic
+};
+struct ScoreSelection
+{
+    SelectionKind kind = SelectionKind::None;
+    QStringList ids;
+    QVector<int> measures;
+    int track = 0, verse = 0;
+};
+struct ScoreDropTarget
+{
+    MusicalTime position;
+    int track = 0, verse = 0, measure = -1;
+    QVector<int> measures;
+};
 struct EditRequest
 {
     enum class Kind
@@ -132,6 +154,7 @@ struct EditRequest
         Delete,
         AddChordNote,
         Lyrics,
+        LyricsBatch,
         AppendMeasure,
         DeleteMeasure,
         AddMark,

@@ -68,6 +68,7 @@ QJsonObject LayoutSettings::toJson() const
     S(lineWidth);
     S(headerGap);
     S(measuresPerLine);
+    S(showLyricNumbers);
     S(chineseFont);
     S(numberFont);
     S(titleFont);
@@ -131,6 +132,7 @@ LayoutSettings LayoutSettings::fromJson(const QJsonObject &root)
     D(lineWidth, 0.4, 4);
     D(headerGap, 0, 60);
     s.measuresPerLine = std::clamp(merged["measuresPerLine"].toInt(4), 1, 32);
+    B(showLyricNumbers);
     B(subtitleBold);
     B(authorBold);
     B(noteBold);

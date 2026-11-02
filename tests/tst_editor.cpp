@@ -52,10 +52,11 @@ class EditorTest : public QObject
                 voice << &h;
         QTest::mouseClick(&canvas, Qt::LeftButton, Qt::ShiftModifier,
                           (voice[3]->rect.center() * canvas.zoom()).toPoint());
-        QCOMPARE(canvas.selection(), QStringList{voice[3]->id});
+        QCOMPARE(canvas.selection().size(), 4);
+        QVERIFY(canvas.selection().contains(voice[3]->id));
         QTest::mouseClick(&canvas, Qt::LeftButton, Qt::ControlModifier,
                           (voice[0]->rect.center() * canvas.zoom()).toPoint());
-        QCOMPARE(canvas.selection().size(), 2);
+        QCOMPARE(canvas.selection().size(), 3);
     }
     void restReplacementKeepsSelection()
     {

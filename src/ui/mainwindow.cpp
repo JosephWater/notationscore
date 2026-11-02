@@ -13,6 +13,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDockWidget>
+#include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -29,6 +30,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QTimer>
@@ -192,8 +194,11 @@ void MainWindow::buildMenus()
     edit->addAction(tr("复制"), m_canvas, &ScoreCanvas::copy, QKeySequence::Copy);
     edit->addAction(tr("粘贴"), m_canvas, &ScoreCanvas::paste, QKeySequence::Paste);
     edit->addAction(
-        tr("删除"), this, [this] { m_canvas->apply({EditRequest::Kind::Delete}); },
-        QKeySequence::Delete);
+        tr("删除"), this, [this] { m_canvas->deleteSelection(); }, QKeySequence::Delete);
+    auto *insertPaste = edit->addAction(tr("插入粘贴"), QKeySequence("Ctrl+Shift+V"), m_canvas,
+                                        &ScoreCanvas::pasteInsert);
+    insertPaste->setShortcutContext(Qt::WidgetShortcut);
+    m_canvas->addAction(insertPaste);
     edit->addAction(tr("编辑歌词…"), this, &MainWindow::editLyrics, QKeySequence("Ctrl+L"));
     toolbar->addActions({newAction, openAction, saveAction});
     toolbar->addSeparator();
@@ -202,8 +207,9 @@ void MainWindow::buildMenus()
     auto *entryMode = new QComboBox;
     entryMode->setObjectName("entryMode");
     entryMode->addItem(tr("末尾追加"), int(EntryMode::Append));
-    entryMode->addItem(tr("修改音符"), int(EntryMode::Overwrite));
-    entryMode->addItem(tr("选后插入"), int(EntryMode::Insert));
+    entryMode->addItem(tr("修改／覆盖"), int(EntryMode::Overwrite));
+    entryMode->addItem(tr("插入"), int(EntryMode::Insert));
+    entryMode->setToolTip(tr("直接输入在选中内容后插入；插入粘贴在所选起点前插入"));
     toolbar->addWidget(entryMode);
     connect(entryMode, &QComboBox::activated, this,
             [this, entryMode](int)
@@ -212,7 +218,7 @@ void MainWindow::buildMenus()
                     return;
                 auto mode = EntryMode(entryMode->currentData().toInt());
                 if (mode == EntryMode::Append)
-                    m_canvas->selectAppendPosition(m_canvas->activeTrack());
+                    m_canvas->selectEnd();
                 m_canvas->entryController()->setMode(mode);
                 m_canvas->setFocus();
             });
@@ -327,13 +333,19 @@ void MainWindow::buildMenus()
         {
             QMessageBox::information(
                 this, tr("简谱编辑"),
-                tr("点击音符后依次覆盖；Ctrl+点击或框选多个音符。\n1–7 修改音高，0 "
+                tr("点击音符或歌词修改，点击末尾空格连续追加；Insert 切换插入／修改。\n"
+                   "从未选中内容开始拖动划选，Shift 点击连选，Ctrl 点击多选。\n"
+                   "点击小节内空白选整节；Ctrl 多节选取，Shift 连选小节。\n"
+                   "拖动已选内容搬移，Ctrl 拖动复制；蓝色落点表示在目标前插入。\n"
+                   "Ctrl+C 复制；Ctrl+V 按当前模式覆盖／插入；Ctrl+Shift+V 强制插入。\n"
+                   "1–7 修改音高，0 "
                    "休止符，8 隐藏休止符，9 节奏 X；End 在末尾追加。\n← → 选择前后音符，↑ ↓ "
-                   "选择声部，Alt+↑↓ 改音高，Ctrl+↑↓ 切换声部。\n点击文字稿或谱面切换编辑；Insert "
-                   "切换插入／修改。B/Z/D/P "
+                   "在音符、各段歌词与文字之间导航；Alt+↑↓ 改音高，Ctrl+↑↓ 切换声部。\n"
+                   "点击文字稿或谱面切换编辑。B/Z/D/P "
                    "编辑题目、词曲、调号、拍号；Q 新声部，C 新歌词；/ 减时，- 增时，' 和 , "
-                   "改八度。\nL 编辑所选歌词，Ctrl+C/V 复制粘贴，Ctrl+Z/Y "
-                   "撤销重做。\n跨音符记号需选择同一声部的起止音符。"));
+                   "改八度。\nL 编辑所选歌词，Ctrl+Z/Y 撤销重做。\n"
+                   "标题与记号拖动吸附；圆柄旋转、方柄缩放，Alt 拖动取消吸附；Alt+方向键微调。\n"
+                   "跨音符记号需选择同一声部的起止音符。"));
         });
     help->addAction(tr("关于"), this,
                     [this]
@@ -439,6 +451,53 @@ void MainWindow::buildPanels()
     m_selectionInfo = new QLabel(tr("未选择"));
     m_selectionInfo->setWordWrap(true);
     form->addRow(m_selectionInfo);
+    m_rotation = new QDoubleSpinBox;
+    m_rotation->setObjectName("elementRotation");
+    m_rotation->setRange(-360, 360);
+    m_rotation->setSuffix(tr(" °"));
+    m_rotation->setSingleStep(1);
+    m_elementScale = new QDoubleSpinBox;
+    m_elementScale->setObjectName("elementScale");
+    m_elementScale->setRange(25, 400);
+    m_elementScale->setSuffix(tr(" %"));
+    m_elementScale->setValue(100);
+    form->addRow(tr("旋转"), m_rotation);
+    form->addRow(tr("缩放"), m_elementScale);
+    auto transform = [this]
+    {
+        if (m_refreshing || m_canvas->selection().size() != 1)
+            return;
+        m_document.transformElement(m_canvas->selection().first(), m_rotation->value(),
+                                    m_elementScale->value() / 100, "element-transform");
+    };
+    connect(m_rotation, &QDoubleSpinBox::valueChanged, this, [transform](double) { transform(); });
+    connect(m_elementScale, &QDoubleSpinBox::valueChanged, this,
+            [transform](double) { transform(); });
+    auto *resetTransform = new QPushButton(tr("恢复元素位置与变换"));
+    form->addRow(resetTransform);
+    connect(resetTransform, &QPushButton::clicked, this,
+            [this]
+            {
+                if (m_canvas->selection().size() != 1)
+                    return;
+                auto element =
+                    m_canvas->layoutResult().elements.value(m_canvas->selection().first());
+                if (!element || !element->identity().movable)
+                    return;
+                auto view = m_document.viewSettings();
+                auto offsets = view["elementOffsets"].toObject();
+                offsets.remove(element->identity().key);
+                view["elementOffsets"] = offsets;
+                m_document.setViewSettings(view);
+            });
+    m_pendingLyrics = new QLabel;
+    m_pendingLyrics->setObjectName("pendingLyrics");
+    m_pendingLyrics->setWordWrap(true);
+    form->addRow(tr("待分配歌词"), m_pendingLyrics);
+    auto *clearPending = new QPushButton(tr("移除待分配歌词（可撤销）"));
+    form->addRow(clearPending);
+    connect(clearPending, &QPushButton::clicked, this,
+            [this] { m_document.discardPendingLyrics(); });
     m_verse = new QSpinBox;
     m_verse->setRange(1, 1024);
     form->addRow(tr("歌词段次"), m_verse);
@@ -511,6 +570,10 @@ void MainWindow::refresh()
         if (voice.track == m_canvas->activeTrack())
             m_voices->setCurrentItem(item);
     }
+    QStringList pending;
+    for (auto value : m_document.inputState()["pendingLyrics"].toArray())
+        pending << value.toString();
+    m_pendingLyrics->setText(pending.isEmpty() ? tr("无") : pending.join(" "));
     auto reports =
         m_canvas->score().warnings + m_document.inputMessages() + m_canvas->layoutResult().warnings;
     m_report->setPlainText(reports.isEmpty() ? tr("曲谱已载入，未发现导入警告。")
@@ -525,14 +588,52 @@ void MainWindow::refresh()
 void MainWindow::selectionChanged()
 {
     auto ids = m_canvas->modelSelection();
+    auto content = m_canvas->contentSelection();
+    if (content.kind == SelectionKind::Measures)
+    {
+        m_rotation->setEnabled(false);
+        m_elementScale->setEnabled(false);
+        m_lyrics->clear();
+        m_selectionInfo->setText(tr("已选择 %1 个小节（全部声部）\nCtrl+C 复制；Ctrl+V "
+                                    "覆盖；Ctrl+Shift+V 插入；拖动搬移")
+                                     .arg(content.measures.size()));
+        return;
+    }
+    auto movable = m_canvas->selection().size() == 1
+                       ? m_canvas->layoutResult().elements.value(m_canvas->selection().first())
+                       : nullptr;
+    bool enabled = movable && movable->identity().movable;
+    m_rotation->setEnabled(enabled);
+    m_elementScale->setEnabled(enabled);
+    if (enabled)
+    {
+        auto value = m_document.viewSettings()["elementOffsets"]
+                         .toObject()[movable->identity().key]
+                         .toObject();
+        QSignalBlocker r(m_rotation), s(m_elementScale);
+        m_rotation->setValue(value["rotation"].toDouble());
+        m_elementScale->setValue(value["scale"].toDouble(1) * 100);
+    }
+    if (auto *slot = m_canvas->selectedLyric())
+    {
+        QSignalBlocker blocker(m_verse);
+        m_verse->setValue(slot->verse + 1);
+        m_lyrics->setText(slot->text);
+        m_selectionInfo->setText(
+            tr("第 %1 段歌词 · 已选 %2 个词位\n点击填词，Insert 插入；方向键导航")
+                .arg(slot->verse + 1)
+                .arg(m_canvas->selection().size()));
+        return;
+    }
     m_selectionInfo->setText(ids.isEmpty() ? tr("未选择音符")
                                            : tr("已选择 %1 个元素").arg(ids.size()));
     if (m_canvas->selection().size() == 1)
     {
         auto element = m_canvas->layoutResult().elements.value(m_canvas->selection().first());
         if (element && element->identity().movable)
-            m_selectionInfo->setText(element->identity().label +
-                                     tr("\n拖动调整；方向键 1 px，Alt+方向键 0.2 px"));
+            m_selectionInfo->setText(
+                element->identity().label +
+                tr("\n拖动吸附；Alt+方向键 1 px，Ctrl+Alt 精调；圆柄旋转，方柄缩放"));
     }
     m_lyrics->clear();
     if (ids.isEmpty())

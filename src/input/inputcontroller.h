@@ -36,9 +36,6 @@ class InputController final : public QObject
     QTimer m_timer;
     bool m_refreshing = false, m_seenQ = false, m_composing = false;
     bool m_annotation = false;
-    bool m_globalLyrics = false;
-    int m_lyricVerse = 0;
-    QString m_lyricBase;
     int m_voice = 1, m_inlineStart = -1;
     QString m_inlinePrefix;
     QString m_observedSource;

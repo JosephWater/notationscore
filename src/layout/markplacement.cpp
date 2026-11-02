@@ -6,25 +6,19 @@ namespace jianpu
 qreal MarkPlacement::labelY(const QString &kind, qreal top, qreal bottom)
 {
     if (kind == "dynamic")
-        return bottom + 16;
-    if (kind == "articulation" || kind == "fermata")
-        return top - 23;
-    if (kind == "marker" || kind == "jump")
-        return top - 58;
-    return top - 42;
+        return bottom + 3;
+    return top - 23;
 }
 qreal MarkPlacement::belowReserve(const QVector<MarkData> &marks, int track, qint64 start,
                                   qint64 end)
 {
-    qreal reserve = 0;
+    bool dynamic = false, hairpin = false;
     for (const auto &mark : marks)
         if (mark.track == track && mark.tick < end && (mark.endTick > start || mark.tick >= start))
         {
-            if (mark.kind == "hairpin")
-                reserve = std::max(reserve, 60.0);
-            else if (mark.kind == "dynamic")
-                reserve = std::max(reserve, 30.0);
+            dynamic |= mark.kind == "dynamic";
+            hairpin |= mark.kind == "hairpin";
         }
-    return reserve;
+    return (dynamic ? 22.0 : 0.0) + (hairpin ? 16.0 : 0.0);
 }
 } // namespace jianpu

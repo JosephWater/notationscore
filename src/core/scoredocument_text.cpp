@@ -293,42 +293,52 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
         protectedContent = true;
     if (protectedContent)
     {
-        auto body = [](const QString &s)
+        auto signature = [](TextParseResult value)
         {
-            QStringList lines;
-            for (auto line : s.split('\n'))
-                if (QRegularExpression("^\\s*[QC]\\d*\\s*[:：]").match(line).hasMatch())
-                    lines << line;
-            return lines;
+            QStringList result;
+            for (const auto &span : value.spans)
+                result << QString("span:%1:%2:%3:%4:%5")
+                              .arg(span.kind)
+                              .arg(span.voice)
+                              .arg(span.first)
+                              .arg(span.last)
+                              .arg(span.closed);
+            std::sort(value.notes.begin(), value.notes.end(), [](const auto &a, const auto &b)
+                      { return a.voice != b.voice ? a.voice < b.voice : a.position < b.position; });
+            for (const auto &n : value.notes)
+            {
+                QString key = QString("%1:%2:%3:%4:%5:%6:%7:%8:%9:%10")
+                                  .arg(n.voice)
+                                  .arg(n.degree)
+                                  .arg(n.octave)
+                                  .arg(n.accidental)
+                                  .arg(n.duration.n)
+                                  .arg(n.duration.d)
+                                  .arg(n.tieForward)
+                                  .arg(n.tuplet)
+                                  .arg(n.normal)
+                                  .arg(n.annotation);
+                key += n.dynamics.join("&");
+                for (const auto &g : n.graces)
+                    key += FanqieFormat::token(g) + QString::number(g.graceAfter);
+                result << key;
+            }
+            return result;
         };
-        const auto baseline = m_input.contains("source") ? m_input["source"].toString()
-                                                         : FanqieFormat().fromSnapshot(snapshot());
-        if (body(source) != body(baseline))
-            return fail(tr("此曲谱含受保护对象，请使用谱面编辑；文字修改不会覆盖原始乐谱。"));
+        const auto baseline = sourceText();
+        auto original = parseText(baseline);
+        if (signature(parsed) != signature(original))
+            return fail(tr("此导入乐谱含文字格式无法完整表示的对象；歌词和标题可以直接修改，音乐结"
+                           "构请在谱面编辑。"));
         // Clone the complete native score for metadata edits, preserving every imported object.
         using namespace mu::engraving;
-        auto app = muse::modularity::globalIoc()->resolve<muse::IApplication>("jianpu");
-        auto clone = EngravingProject::create(app->contexts().front());
-        auto buffer = muse::io::Buffer::opened(muse::io::IODevice::WriteOnly);
-        MscWriter::Params wp;
-        wp.device = &buffer;
-        wp.filePath = "score.mscz";
-        MscWriter writer(wp);
-        if (!writer.open() || !m_project->writeMscz(writer, false))
-            return fail(tr("无法复制受保护曲谱"));
-        writer.close();
-        auto data = buffer.data();
-        muse::io::Buffer readerBuffer(&data);
-        readerBuffer.open(muse::io::IODevice::ReadOnly);
-        MscReader::Params rp;
-        rp.device = &readerBuffer;
-        rp.filePath = "score.mscz";
-        MscReader reader(rp);
-        if (!reader.open() || !clone->loadMscz(reader, nullptr, false) ||
-            !clone->setupMasterScore(false))
-            return fail(tr("无法恢复受保护曲谱"));
+        auto clone = cloneProject();
+        if (!clone)
+            return false;
         ScoreDocument staging;
         staging.m_project = clone;
+        staging.m_input = m_input;
+        staging.m_view = m_view;
         auto old = staging.snapshot();
         if (old.keyFifths != parsed.fifths || old.minor != parsed.minor)
             if (!staging.edit({EditRequest::Kind::SetKey, {}, parsed.fifths, parsed.minor ? 1 : 0}))
@@ -338,6 +348,25 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
             if (!staging.edit(
                     {EditRequest::Kind::SetTime, {}, parsed.numerator, parsed.denominator}))
                 return fail(staging.error());
+        QVector<int> nativeTracks;
+        for (const auto &v : old.voices)
+            if (!v.percussion)
+                nativeTracks << v.track;
+        auto voices = parsed.voiceNames.keys();
+        for (int vi = 0; vi < voices.size(); ++vi)
+            for (int verse = 0; verse < parsed.verseRows.value(voices[vi]); ++verse)
+            {
+                QMap<QString, QString> words;
+                for (const auto &n : parsed.notes)
+                    if (n.voice == voices[vi] && n.degree != 0 && n.degree != 8 && !n.tieBack)
+                        for (const auto &m : old.measures)
+                            for (const auto &e : m.events)
+                                if (!e.grace && e.track == nativeTracks.value(vi) &&
+                                    e.position == n.position && !e.rest)
+                                    words[e.id] = n.lyrics.value(verse);
+                if (!staging.setLyrics(nativeTracks.value(vi), verse, words))
+                    return fail(staging.error());
+            }
         m_project = clone;
     }
     else
@@ -377,9 +406,15 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
     QJsonArray bindings;
     int track = 0;
     QMap<int, int> tracks;
+    auto actual = snapshot().voices;
+    QVector<int> pitched;
+    for (const auto &v : actual)
+        if (!v.percussion)
+            pitched << v.track;
+    int index = 0;
     for (auto it = parsed.voiceNames.begin(); it != parsed.voiceNames.end(); ++it)
     {
-        tracks[it.key()] = track;
+        tracks[it.key()] = protectedContent ? pitched.value(index++) : track;
         track += 4;
     }
     for (const auto &note : parsed.notes)
@@ -404,6 +439,8 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
     m_input["source"] = source;
     m_input["bindings"] = bindings;
     m_input["protected"] = protectedContent;
+    if (!protectedContent)
+        m_input["textOrigin"] = true;
     m_input["hasErrors"] = parsed.hasErrors() || !parsed.pendingLyrics.isEmpty();
     m_input["messages"] = QJsonArray::fromStringList(parsed.messages());
     m_input["pendingSpans"] = pending;
@@ -420,6 +457,32 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
     notify();
     return true;
 }
+bool ScoreDocument::setLyrics(int track, int verse, const QMap<QString, QString> &words,
+                              const QStringList &extra)
+{
+    QJsonObject object;
+    for (auto it = words.begin(); it != words.end(); ++it)
+        object[it.key()] = it.value();
+    return edit({EditRequest::Kind::LyricsBatch,
+                 {},
+                 verse,
+                 track,
+                 QString::fromUtf8(
+                     QJsonDocument(QJsonObject{{"words", object},
+                                               {"pending", QJsonArray::fromStringList(extra)}})
+                         .toJson(QJsonDocument::Compact))});
+}
+void ScoreDocument::discardPendingLyrics()
+{
+    if (m_input["pendingLyrics"].toArray().isEmpty())
+        return;
+    auto before = historyState();
+    m_input["pendingLyrics"] = QJsonArray();
+    m_input["overflow"] = QJsonArray();
+    syncSourceLayout();
+    recordChange(before);
+    notify();
+}
 void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreSnapshot &before)
 {
     if (!m_input.contains("source"))
@@ -427,6 +490,7 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
     using K = EditRequest::Kind;
     auto protect = [&]
     {
+        m_input["textOrigin"] = m_input.value("textOrigin").toBool(before.textBacked);
         m_input["protected"] = true;
         auto messages = m_input["messages"].toArray();
         messages << tr("此谱面操作包含文字稿不能完整表示的对象，已保护原始曲谱；可继续谱面编辑。");
@@ -437,8 +501,12 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
         request.kind == K::AppendMeasure || request.kind == K::DeleteMeasure)
     {
         protect();
+        if (request.kind == K::AddVoice || request.kind == K::AddPart)
+            m_input["textOrigin"] = false;
         return;
     }
+    if (request.kind == K::LyricsBatch)
+        return;
     auto source = m_input["source"].toString();
     auto parsed = parseText(source);
     struct Replacement
@@ -452,6 +520,16 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
     {
         bool protectedContent = false;
         auto projection = FanqieFormat().fromSnapshot(after, &protectedContent);
+        if (before.textBacked &&
+            std::all_of(after.marks.begin(), after.marks.end(), [](const auto &m)
+                        { return (m.kind == "key" || m.kind == "time") && m.tick == 0; }) &&
+            std::all_of(after.measures.begin(), after.measures.end(),
+                        [](const auto &m)
+                        {
+                            return std::all_of(m.events.begin(), m.events.end(), [](const auto &e)
+                                               { return !e.grace && e.notes.size() <= 1; });
+                        }))
+            protectedContent = false;
         auto projected = FanqieFormat().parse(projection);
         QJsonArray bindings;
         for (auto n : projected.notes)
@@ -775,14 +853,6 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
         m_input["automaticBarOffsets"] = automaticBars;
         m_input["bindings"] = bindings;
         m_input["overflow"] = updated.overflowJson();
-        if (request.kind == K::Duration && first)
-            for (const auto &boundary : parsed.boundaries)
-                if (boundary.position > first->position &&
-                    boundary.position < first->position + MusicalTime(1, request.value))
-                {
-                    protect();
-                    break;
-                }
         if (!updated.pendingLyrics.isEmpty())
         {
             m_input["pendingLyrics"] = QJsonArray::fromStringList(updated.pendingLyrics);

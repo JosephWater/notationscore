@@ -14,6 +14,7 @@ struct LayoutSettings
            lyricGap = 10;
     double lineWidth = 1.2, headerGap = 12;
     int measuresPerLine = 4;
+    bool showLyricNumbers = false;
     QString chineseFont = "Noto Serif CJK SC", numberFont = "DejaVu Sans";
     QString titleFont, subtitleFont, authorFont, lyricFont;
     bool subtitleBold = false, authorBold = false, noteBold = true, lyricBold = false;

@@ -60,23 +60,49 @@ void VisualElement::translate(LayoutResult &layout, QPointF delta) const
         auto &item = layout.items[index];
         item.bounds.translate(delta);
         item.path.translate(delta);
+        QTransform before, after;
+        before.translate(-delta.x(), -delta.y());
+        after.translate(delta.x(), delta.y());
+        item.transform = before * item.transform * after;
     }
     for (auto &hit : layout.hits)
         if (hit.id == m_identity.id)
             hit.rect.translate(delta);
 }
+QPointF VisualElement::transformOrigin(const LayoutResult &layout) const
+{
+    QRectF bounds;
+    for (int index : m_items)
+        bounds = bounds.united(primitiveShape(layout.items[index]).boundingRect());
+    return bounds.center();
+}
+void VisualElement::transform(LayoutResult &layout, qreal rotation, qreal scale) const
+{
+    auto origin = transformOrigin(layout);
+    QTransform t;
+    t.translate(origin.x(), origin.y());
+    t.rotate(rotation);
+    t.scale(scale, scale);
+    t.translate(-origin.x(), -origin.y());
+    for (int index : m_items)
+        layout.items[index].transform *= t;
+    for (auto &hit : layout.hits)
+        if (hit.id == m_identity.id)
+            hit.rect = bounds(layout);
+}
 QPainterPath TextVisualElement::hitShape(const LayoutResult &layout) const
 {
     QPainterPath shape;
     for (int index : m_items)
-        shape = shape.united(primitiveShape(layout.items[index]));
+        shape =
+            shape.united(layout.items[index].transform.map(primitiveShape(layout.items[index])));
     return shape;
 }
 QPainterPath SymbolVisualElement::hitShape(const LayoutResult &layout) const
 {
     QPainterPath shape;
     for (int index : m_items)
-        shape.addPath(primitiveShape(layout.items[index]));
+        shape.addPath(layout.items[index].transform.map(primitiveShape(layout.items[index])));
     return shape;
 }
 void VisualElementRegistry::build(LayoutResult &layout, const ScoreSnapshot &score,
@@ -128,6 +154,8 @@ void VisualElementRegistry::build(LayoutResult &layout, const ScoreSnapshot &sco
         info.label = item.text;
         if (id.startsWith("@"))
         {
+            if (id.startsWith("@lyric"))
+                info.movable = false;
             if (id.startsWith("@title"))
                 info.headerField = "B";
             else if (id.startsWith("@author"))
@@ -195,7 +223,11 @@ void VisualElementRegistry::build(LayoutResult &layout, const ScoreSnapshot &sco
     {
         auto offset = offsets.value(element->identity().key).toObject();
         if (element->identity().movable)
+        {
             element->translate(layout, QPointF(offset["x"].toDouble(), offset["y"].toDouble()));
+            element->transform(layout, offset["rotation"].toDouble(),
+                               offset["scale"].toDouble(1.0));
+        }
     }
 }
 } // namespace jianpu

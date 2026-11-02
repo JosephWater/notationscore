@@ -6,6 +6,7 @@ class QListWidget;
 class QTreeWidget;
 class QComboBox;
 class QSpinBox;
+class QDoubleSpinBox;
 class QLineEdit;
 class QLabel;
 class QPlainTextEdit;
@@ -41,6 +42,9 @@ class MainWindow final : public QMainWindow
     QSpinBox *m_verse;
     QLineEdit *m_lyrics;
     QLabel *m_selectionInfo;
+    QDoubleSpinBox *m_rotation;
+    QDoubleSpinBox *m_elementScale;
+    QLabel *m_pendingLyrics;
     QAction *m_undo;
     QAction *m_redo;
     QMenu *m_viewMenu = nullptr;

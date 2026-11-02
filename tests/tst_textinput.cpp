@@ -210,12 +210,11 @@ class TextInputTest : public QObject
         QTRY_COMPARE(w.document()->snapshot().noteCount(), 5);
         w.canvas()->setFocus();
         QTest::keyClick(w.canvas(), Qt::Key_C);
-        auto *input = w.findChild<QLineEdit *>("keyboardTextInput");
-        QVERIFY(input->isVisible());
+        auto *input = w.canvas();
+        QVERIFY(w.canvas()->lyricSelected());
         QInputMethodEvent ime;
         ime.setCommitString(QStringLiteral("春夏秋冬"));
         QApplication::sendEvent(input, &ime);
-        QTest::keyClick(input, Qt::Key_Return);
         QString words;
         for (const auto &measure : w.document()->snapshot().measures)
             for (const auto &event : measure.events)
@@ -755,7 +754,7 @@ class TextInputTest : public QObject
         QCOMPARE(p.subtitles, QStringList{QStringLiteral("幼儿歌曲")});
         QCOMPARE(p.voiceNames.size(), 1);
         QCOMPARE(p.notes.size(), 24);
-        QCOMPARE(p.pendingLyrics.join(""), QStringLiteral("友多，"));
+        QCOMPARE(p.pendingLyrics.join(""), QStringLiteral("快活。"));
         QVERIFY(p.hasErrors());
         auto words =
             FanqieFormat().parse(QStringLiteral("Q: 1- 0 2 3 4\nC: 你~好，@世界\nC: 春夏秋冬"));
@@ -1067,8 +1066,8 @@ class TextInputTest : public QObject
         QTest::keyClick(w.canvas(), Qt::Key_Slash);
         QTRY_VERIFY(w.document()->sourceText().contains("Q2: 5/"));
         QTest::keyClick(w.canvas(), Qt::Key_C);
-        auto *input = w.findChild<QLineEdit *>("keyboardTextInput");
-        QVERIFY(input && input->isVisible());
+        auto *input = w.canvas();
+        QVERIFY(w.canvas()->lyricSelected());
         QInputMethodEvent commit;
         commit.setCommitString(QStringLiteral("中"));
         QApplication::sendEvent(input, &commit);
@@ -1087,12 +1086,11 @@ class TextInputTest : public QObject
         QTRY_COMPARE(w.document()->snapshot().noteCount(), 4);
         w.canvas()->setFocus();
         QTest::keyClick(w.canvas(), Qt::Key_C);
-        auto *input = w.findChild<QLineEdit *>("keyboardTextInput");
-        QVERIFY(input->isVisible());
+        auto *input = w.canvas();
+        QVERIFY(w.canvas()->lyricSelected());
         QInputMethodEvent commit;
         commit.setCommitString(QStringLiteral("春，夏秋冬"));
         QApplication::sendEvent(input, &commit);
-        QTest::keyClick(input, Qt::Key_Return);
         auto s = w.document()->snapshot();
         QStringList words;
         for (auto m : s.measures)

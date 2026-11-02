@@ -32,6 +32,8 @@ class ScoreDocument final : public QObject
     bool modified() const;
     ScoreSnapshot snapshot() const;
     const LayoutResult &presentation() const;
+    bool transformElement(const QString &id, double rotation, double scale,
+                          const QString &mergeKey = {});
     bool moveElement(const QString &id, QPointF delta, const QString &mergeKey = {});
     QString error() const { return m_error; }
     QString filePath() const { return m_path; }
@@ -47,7 +49,13 @@ class ScoreDocument final : public QObject
     void storeInputDraft(const QString &source, const QString &error, const QString &mergeKey = {});
     void sealInputGroup() { m_mergeKey.clear(); }
     QStringList inputMessages() const;
+    bool setLyrics(int track, int verse, const QMap<QString, QString> &words,
+                   const QStringList &extra = {});
+    void discardPendingLyrics();
     QByteArray copy(const QStringList &ids) const;
+    QByteArray copyFragment(const ScoreSelection &) const;
+    bool pasteFragment(const QByteArray &, const ScoreDropTarget &, bool insert, bool move = false);
+    bool deleteFragment(const ScoreSelection &);
   signals:
     void changed();
     void loaded();
@@ -82,8 +90,10 @@ class ScoreDocument final : public QObject
     void syncSourceAfterEdit(const EditRequest &, const ScoreSnapshot &before);
     void syncSourceLayout();
     bool syncSourceLayoutPass();
+    void updateInputDiagnostics(const TextParseResult &);
     void refreshPresentation();
     TextParseResult parseText(const QString &, const SourceChanges &changes = {}) const;
+    std::shared_ptr<mu::engraving::EngravingProject> cloneProject();
     bool m_imported = false;
     QVector<quint64> m_states{0};
     int m_cursor = 0;

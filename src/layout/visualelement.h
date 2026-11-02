@@ -22,6 +22,8 @@ class VisualElement
     virtual QPainterPath hitShape(const LayoutResult &) const = 0;
     QRectF bounds(const LayoutResult &) const;
     void translate(LayoutResult &, QPointF) const;
+    QPointF transformOrigin(const LayoutResult &) const;
+    void transform(LayoutResult &, qreal rotation, qreal scale) const;
 
   protected:
     ElementIdentity m_identity;

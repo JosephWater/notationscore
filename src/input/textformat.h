@@ -77,6 +77,7 @@ struct TextParseResult
     int fifths = 0, numerator = 4, denominator = 4;
     bool minor = false;
     bool fatal = false;
+    bool rewriteLyrics = false;
     QVector<TextNote> notes;
     QVector<TextSpan> spans;
     QVector<TextBoundary> boundaries;
@@ -112,6 +113,8 @@ class FanqieFormat final : public TextFormatAdapter
     QString fromSnapshot(const ScoreSnapshot &, bool *protectedContent = nullptr) const override;
     static QString token(const TextNote &);
     static QStringList lyricTokens(const QString &);
+    // Replace musical fields while retaining headers, comments and unknown fields.
+    static QString replaceMusic(const QString &source, const QString &projection);
     // Reflow musical fields only; retain all header fields and comments. Tied
     // continuations use ^ so measure/system boundaries remain editable text.
     QString alignedSource(const TextParseResult &,
