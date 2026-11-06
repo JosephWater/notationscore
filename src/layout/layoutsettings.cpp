@@ -3,7 +3,11 @@
 #include <QCoreApplication>
 #include <QFontDatabase>
 #include <algorithm>
-static void initJianpuFonts() { Q_INIT_RESOURCE(jianpu_fonts); }
+static void initJianpuFonts()
+{
+    Q_INIT_RESOURCE(jianpu_fonts);
+    Q_INIT_RESOURCE(jianpu_symbols);
+}
 namespace jianpu
 {
 QJsonObject LayoutSettings::defaults(const QString &name)
@@ -172,7 +176,7 @@ QFont LayoutSettings::font(double px, bool bold, bool number) const
         initJianpuFonts();
         for (const auto &path : {":/fonts/assets/fonts/NotoSerifCJKsc-Regular.otf",
                                  ":/fonts/assets/fonts/NotoSansCJKsc-Regular.otf",
-                                 ":/fonts/assets/fonts/DejaVuSans.ttf"})
+                                 ":/fonts/assets/fonts/DejaVuSans.ttf", ":/musicfonts/Bravura.otf"})
             QFontDatabase::addApplicationFont(path);
         return true;
     }();

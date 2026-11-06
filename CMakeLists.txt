@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(JianpuLab VERSION 0.5.0 LANGUAGES C CXX)
+project(JianpuLab VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,14 +8,14 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Qt6 6.10.2 EXACT REQUIRED COMPONENTS
-    Core Gui Widgets Xml Svg PrintSupport Multimedia Qml Quick QuickControls2 Test LinguistTools Core5Compat Concurrent)
+    Core Gui Widgets Xml Svg PrintSupport Multimedia Qml Quick QuickControls2 Test LinguistTools Core5Compat Concurrent Network)
 message(STATUS "JianpuLab Qt ${Qt6_VERSION}: ${Qt6_DIR}")
 qt_standard_project_setup(REQUIRES 6.10)
 
 add_subdirectory(cmake/engine)
 
 qt_add_library(jianpu_notation STATIC src/input/textformat.cpp src/input/textformat.h
-    src/input/textreflow.cpp src/input/lyricsourcemap.cpp src/input/lyricsourcemap.h src/core/musicaltime.h src/core/scoretypes.h)
+    src/input/textmarks.cpp src/input/textmarks.h src/input/textreflow.cpp src/input/lyricsourcemap.cpp src/input/lyricsourcemap.h src/core/musicaltime.h src/core/scoretypes.h)
 target_include_directories(jianpu_notation PUBLIC src)
 target_link_libraries(jianpu_notation PUBLIC Qt6::Core)
 qt_add_library(jianpu_presentation STATIC src/layout/jianpulayout.cpp src/layout/jianpulayout.h
@@ -52,8 +52,16 @@ endif()
 
 qt_add_executable(jianpu_lab src/main.cpp)
 set_target_properties(jianpu_lab PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE WIN32_EXECUTABLE TRUE)
+qt_add_library(jianpu_ai STATIC src/ai/aiconfig.cpp src/ai/aiconfig.h
+    src/ai/aiclient.cpp src/ai/aiclient.h src/ai/recognitiontask.cpp src/ai/recognitiontask.h)
+target_include_directories(jianpu_ai PUBLIC src)
+target_link_libraries(jianpu_ai PUBLIC jianpu_document Qt6::Network)
+qt_add_executable(jianpu_ai_probe tools/airecognitionprobe.cpp)
+set_target_properties(jianpu_ai_probe PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+target_link_libraries(jianpu_ai_probe PRIVATE jianpu_ai)
+qt_add_resources(jianpu_ai jianpu_ai_prompt PREFIX "/ai" BASE src/ai FILES src/ai/recognition-system-v1.txt)
 qt_add_library(jianpu_editor STATIC
-    src/ui/scorecanvas.cpp src/ui/scorecanvas_selection.cpp src/ui/scorecanvas.h src/ui/mainwindow.cpp src/ui/mainwindow.h
+    src/ui/airecognition.cpp src/ui/airecognition.h src/ui/scorecanvas.cpp src/ui/scorecanvas_selection.cpp src/ui/scorecanvas.h src/ui/mainwindow.cpp src/ui/mainwindow.h
     src/ui/sourceeditor.cpp src/ui/sourceeditor.h src/ui/layoutpanel.cpp src/ui/layoutpanel.h
     src/input/inputcontroller.cpp src/input/inputcontroller.h
     src/input/scoreentrycontroller.cpp src/input/scoreentrycontroller.h
@@ -61,9 +69,10 @@ qt_add_library(jianpu_editor STATIC
     src/input/selectionpolicy.cpp src/input/selectionpolicy.h
     src/input/musictextediting.cpp src/input/musictextediting.h src/input/entrysession.h)
 target_include_directories(jianpu_editor PUBLIC src)
-target_link_libraries(jianpu_editor PUBLIC jianpu_document Qt6::Widgets)
+target_link_libraries(jianpu_editor PUBLIC jianpu_document jianpu_ai Qt6::Widgets)
 qt_add_resources(jianpu_presentation jianpu_fonts PREFIX "/fonts" FILES
     assets/fonts/NotoSerifCJKsc-Regular.otf assets/fonts/NotoSansCJKsc-Regular.otf assets/fonts/DejaVuSans.ttf)
+qt_add_resources(jianpu_presentation jianpu_symbols PREFIX "/musicfonts" BASE "${JIANPU_MUSESCORE_SOURCE}/fonts/bravura" FILES "${JIANPU_MUSESCORE_SOURCE}/fonts/bravura/Bravura.otf")
 target_link_libraries(jianpu_lab PRIVATE jianpu_editor)
 install(TARGETS jianpu_lab RUNTIME DESTINATION bin)
 extdeps_install_consumed()
@@ -88,6 +97,17 @@ endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
+    qt_add_executable(tst_notation tests/tst_notation.cpp)
+    set_target_properties(tst_notation PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    target_link_libraries(tst_notation PRIVATE jianpu_editor Qt6::Test)
+    target_compile_definitions(tst_notation PRIVATE NOTATION_EXAMPLE="${CMAKE_CURRENT_SOURCE_DIR}/examples/ai-recognition.jptxt")
+    add_test(NAME notation COMMAND tst_notation)
+    set_tests_properties(notation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
+    qt_add_executable(tst_ai tests/tst_ai.cpp)
+    set_target_properties(tst_ai PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    target_link_libraries(tst_ai PRIVATE jianpu_editor Qt6::Test)
+    add_test(NAME ai COMMAND tst_ai)
+    set_tests_properties(ai PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
     qt_add_executable(tst_selection tests/tst_selection.cpp)
     set_target_properties(tst_selection PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
     target_link_libraries(tst_selection PRIVATE jianpu_editor Qt6::Test)

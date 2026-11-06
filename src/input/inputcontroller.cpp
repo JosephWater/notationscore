@@ -89,7 +89,7 @@ int lyricEndCursor(const QString &oldSource, const QString &source, const TextPa
 InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *window)
     : QObject(window), m_document(d), m_canvas(c)
 {
-    m_dock = new QDockWidget(tr("文字稿 · 番茄式 1.0"), window);
+    m_dock = new QDockWidget(tr("文字稿 · 番茄式"), window);
     m_dock->setObjectName("sourceDock");
     auto *panel = new QWidget;
     auto *layout = new QVBoxLayout(panel);
@@ -227,6 +227,8 @@ InputController::InputController(ScoreDocument *d, ScoreCanvas *c, QMainWindow *
 }
 void InputController::refresh()
 {
+    if (m_external)
+        return;
     if (m_refreshing || m_timer.isActive())
         return;
     auto source = m_document->sourceText();
@@ -270,6 +272,8 @@ void InputController::refresh()
 }
 void InputController::commit()
 {
+    if (m_external)
+        return;
     if (m_composing)
     {
         m_timer.start();
@@ -313,7 +317,7 @@ void InputController::commit()
 }
 bool InputController::flush()
 {
-    if (m_composing)
+    if (m_composing || m_external)
         return false;
     m_timer.stop();
     commit();
@@ -337,7 +341,7 @@ int InputController::voiceNumber() const
 }
 void InputController::sourceSelection()
 {
-    if (m_refreshing)
+    if (m_refreshing || m_external)
         return;
     int pos = m_editor->textCursor().position();
     auto source = m_editor->toPlainText();
@@ -723,5 +727,53 @@ bool InputController::eventFilter(QObject *obj, QEvent *event)
         return true;
     }
     return false;
+}
+void InputController::beginExternalSource()
+{
+    m_timer.stop();
+    m_sourceChanges = {};
+    m_external = true;
+    m_editor->setReadOnly(true);
+    m_dock->show();
+    m_dock->raise();
+    updateExternalSource({});
+}
+void InputController::updateExternalSource(const QString &source)
+{
+    if (!m_external)
+        return;
+    QScopedValueRollback<bool> guard(m_refreshing, true);
+    auto current = m_editor->toPlainText();
+    if (source.startsWith(current))
+    {
+        auto cursor = m_editor->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        cursor.insertText(source.mid(current.size()));
+        m_editor->setTextCursor(cursor);
+    }
+    else
+        m_editor->setPlainText(source);
+    m_editor->ensureCursorVisible();
+}
+bool InputController::endExternalSource(const QString &source, bool commit, const QString &message)
+{
+    if (!m_external)
+        return false;
+    updateExternalSource(source);
+    m_external = false;
+    m_timer.stop();
+    m_sourceChanges = {};
+    bool ok = false;
+    {
+        QScopedValueRollback<bool> guard(m_refreshing, true);
+        ok = commit && m_document->applyText(source, "ai-import");
+        if (!ok && !source.isEmpty())
+            m_document->storeInputDraft(source, message.isEmpty() ? m_document->error() : message,
+                                        "ai-import");
+    }
+    m_editor->setReadOnly(false);
+    refresh();
+    m_observedSource = m_editor->toPlainText();
+    return ok;
 }
 } // namespace jianpu

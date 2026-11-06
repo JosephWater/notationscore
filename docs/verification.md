@@ -1,3 +1,24 @@
+# 五线谱导入保真与 AI 图片识谱（0.6.0）
+
+验证日期：2026-11-05。Linux、GCC 15.2.0、Qt 6.10.2；固定 MuseScore 提交保持干净。
+
+- Linux Release、Debug 均完成构建，最终 **11/11 CTest 套件通过**。新增 `tst_notation` 与 `tst_ai`；旧套件继续通过。日志：`artifacts/build-ai-release.log`、`build-ai-debug.log`、`ctest-ai-release-final.log`、`ctest-ai-debug.log`。
+- 新语义用例包含和弦、跳房子多编号与开闭端点、反复次数、跨行续画、MusicXML/MXL/工程往返、七连音的精确记号时间、变调变拍、八度线不重复移调、删除词位/改休止保留两段歌词、片段复制、撤销重做和罕见原生演奏法的安全导出。
+- AI 模拟服务验证 UTF-8/SSE 分包、忽略推理内容、损坏事件、截断、401/403/429/500、取消、超时、固定看图复核、最多三次调用、图片顺序、独立窗口、草稿人工接续、一次撤销和识别中关闭窗口。常规测试不连接外部收费服务。
+- 192 DPI 下完整运行 notation、ai、selection、lyrics 四套测试。固定字体截图：`artifacts/ai-notation-classic.png`、`ai-notation-modern.png`、`ai-notation-children.png`、`ai-notation-ui.png`。保留了原有三种排版预设，Bravura 音乐符号随程序内嵌。
+
+真实接口使用用户提供的 Sophnet 地址与 key、`DeepSeek-Flash`，验证文本、图片及 SSE 流式返回。key 仅写入用户配置，不进入源码、工程或截图。
+
+- 32 小节双页谱：两轮识别/看图复核，128 个音符、音高与时值顺序、双段歌词与参考 MusicXML 比较一致。
+- 含和弦、跳房子与双段歌词的复杂谱图：两轮后 19 个音符及歌词与参考一致；但部分跳房子、踏板和跳转范围不正确，仍有记号漏抄。格式通过不代表完整识别所有图中记号。
+- 默认高强度隐藏推理曾耗尽输出额度且没有正文；最终请求对 DeepSeek 显式关闭思考模式，实际图片识别与复核可以正常流式返回。
+
+识别记录：`artifacts/ai-live-rich-v3.log`、`ai-live-rich-v3.jptxt`、`ai-live-multipage.log`、`ai-live-multipage.jptxt`、`ai-live-comparison.json`。它们属于本次样例验证，不能推断任意谱图准确率。导入原生文件的保真与 AI 看图准确率分别验证。
+
+Windows 脚本已加入新程序和测试的依赖部署；本轮未执行 Windows/MSVC、真实 Windows 中文输入法或无开发工具便携环境验收。MIDI 不携带的制谱信息不推测补齐，固定内核不认识的 MusicXML 扩展不能保证保留。使用与文字扩展说明见 [AI 图片识谱](ai-recognition.md)。
+
+---
+
 # 词位编辑、范围选择与片段搬移（0.5.0）
 
 验证日期：2026-11-02。Linux、GCC 15.2.0、Qt 6.10.2；固定 MuseScore 与两个子模块提交，参考源码保持干净。

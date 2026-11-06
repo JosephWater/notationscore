@@ -25,7 +25,11 @@ class MainWindow final : public QMainWindow
     bool openPath(const QString &path, bool interactive = true);
     ScoreDocument *document() { return &m_document; }
     ScoreCanvas *canvas() { return m_canvas; }
+    InputController *inputController() { return m_input; }
     void setConfirmClose(bool confirm) { m_confirmClose = confirm; }
+
+  signals:
+    void closingRequested();
 
   protected:
     void closeEvent(QCloseEvent *) override;

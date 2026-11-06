@@ -20,6 +20,10 @@ class InputController final : public QObject
     bool flush();
     SourceEditor *editor() const { return m_editor; }
     void sourceSelection();
+    void beginExternalSource();
+    void updateExternalSource(const QString &);
+    bool endExternalSource(const QString &, bool commit, const QString &message = {});
+    bool externalSourceActive() const { return m_external; }
   signals:
     void error(const QString &);
 
@@ -35,6 +39,7 @@ class InputController final : public QObject
     QLabel *m_context;
     QTimer m_timer;
     bool m_refreshing = false, m_seenQ = false, m_composing = false;
+    bool m_external = false;
     bool m_annotation = false;
     int m_voice = 1, m_inlineStart = -1;
     QString m_inlinePrefix;

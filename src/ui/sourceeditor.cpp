@@ -71,9 +71,10 @@ SourceEditor::SourceEditor(QWidget *parent) : QPlainTextEdit(parent), m_gutter(n
     setFont(f);
     setTabStopDistance(fontMetrics().horizontalAdvance(' ') * 4);
     new Highlighter(document());
-    m_completer = new QCompleter(QStringList{"V: 1.0", "B: ", "Z: ", "D: C", "P: 4/4",
-                                             "Q: ", "C: ", "Q1: ", "Q2: ", "C1: ", "C2: "},
-                                 this);
+    m_completer =
+        new QCompleter(QStringList{"V: 1.0", "V: 1.1", "M: ", "B: ", "Z: ", "D: C", "P: 4/4",
+                                   "Q: ", "C: ", "Q1: ", "Q2: ", "C1: ", "C2: "},
+                       this);
     m_completer->setWidget(this);
     m_completer->setCompletionMode(QCompleter::PopupCompletion);
     connect(m_completer, qOverload<const QString &>(&QCompleter::activated), this,

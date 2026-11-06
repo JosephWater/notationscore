@@ -3,6 +3,7 @@
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/barline.h"
 #include "engraving/dom/beam.h"
+#include "engraving/dom/breath.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/factory.h"
@@ -18,7 +19,9 @@
 #include "engraving/dom/note.h"
 #include "engraving/dom/noteval.h"
 #include "engraving/dom/ornament.h"
+#include "engraving/dom/ottava.h"
 #include "engraving/dom/part.h"
+#include "engraving/dom/pedal.h"
 #include "engraving/dom/pitchspelling.h"
 #include "engraving/dom/rest.h"
 #include "engraving/dom/segment.h"
@@ -308,13 +311,15 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
             if (err != Err::NoError)
                 return fail(tr("MusicXML 导入失败（%1）\n%2").arg(int(err)).arg(details));
             if (!details.isEmpty())
-                newWarnings << details;
+                newWarnings << tr("导入器诊断（部分对象可能未读取）：%1").arg(details);
             for (const auto *part : score->parts())
                 for (const auto &entry : part->instruments())
                     entry.second->updateInstrumentId();
         }
         else if (suffix == "mid" || suffix == "midi")
         {
+            newWarnings << tr(
+                "MIDI 仅转换文件实际携带的演奏信息；未提供的跳房子和制谱记号不会推测生成。");
             QFile file(path);
             if (!file.open(QIODevice::ReadOnly))
                 return fail(file.errorString());
@@ -380,7 +385,7 @@ bool ScoreDocument::open(const QString &path, const ImportOptions &options)
             return fail(tr("曲谱结构检查失败：%1").arg(retError(ret)));
         if (!newInput.isEmpty())
         {
-            if (newInput.value("format").toString("fanqie-1.0") != "fanqie-1.0")
+            if (!TextFormatAdapter::create(newInput.value("format").toString("fanqie-1.0")))
                 return fail(tr("不支持此文字稿格式"));
             const auto sourceSize = newInput.value("source").toString().size();
             for (auto value : newInput.value("bindings").toArray())
@@ -1384,6 +1389,7 @@ ScoreSnapshot ScoreDocument::snapshot() const
         measure.denominator = m->timesig().denominator();
         measure.repeatStart = m->repeatStart();
         measure.repeatEnd = m->repeatEnd();
+        measure.repeatCount = std::max(2, m->repeatCount());
         measure.barline = int(m->endBarLineType());
         for (auto *segment = m->first(); segment; segment = segment->next())
         {
@@ -1467,6 +1473,32 @@ ScoreSnapshot ScoreDocument::snapshot() const
                         event.articulations << names.value(name, name);
                         result.marks.push_back({idFor(art), "articulation", names.value(name, name),
                                                 int(track), cr->tick().ticks()});
+                        static const QMap<QString, QString> xmlTypes{
+                            {"staccato", "staccato"}, {"tenuto", "tenuto"},
+                            {"sforzato", "accent"},   {"accent", "accent"},
+                            {"trill", "trill-mark"},  {"turn", "turn"},
+                            {"mordent", "mordent"}};
+                        auto type = xmlTypes.value(name);
+                        if (type.isEmpty())
+                        {
+                            auto sym = SymNames::nameForSymId(art->symId()).ascii();
+                            static const QMap<QString, QString> symbols{
+                                {"articStaccatoAbove", "staccato"},
+                                {"articTenutoAbove", "tenuto"},
+                                {"articAccentAbove", "accent"},
+                                {"articMarcatoAbove", "strong-accent"},
+                                {"articStaccatissimoAbove", "staccatissimo"},
+                                {"ornamentMordent", "inverted-mordent"},
+                                {"ornamentShortTrill", "mordent"},
+                                {"ornamentTurnInverted", "inverted-turn"}};
+                            type = symbols.value(QString::fromLatin1(sym));
+                        }
+                        result.marks.last().attributes = {{"type", type}};
+                        result.marks.last().position = {cr->tick().numerator(),
+                                                        cr->tick().denominator()};
+                        if (type.isEmpty())
+                            result.warnings
+                                << tr("内核保留：演奏法 %1 的文字格式尚未支持").arg(name);
                     }
                     for (auto *note : toChord(item)->notes())
                     {
@@ -1551,6 +1583,7 @@ ScoreSnapshot ScoreDocument::snapshot() const
         [&](EngravingItem *item)
         {
             QString kind, text;
+            QJsonObject attributes;
             if (item->isDynamic())
             {
                 kind = "dynamic";
@@ -1560,21 +1593,47 @@ ScoreSnapshot ScoreDocument::snapshot() const
             {
                 kind = "tempo";
                 text = toTempoText(item)->plainText().toQString();
+                attributes["bpm"] = toTempoText(item)->tempo().toBPM().val;
+                if (!text.contains(QRegularExpression("[0-9]")))
+                    text += QString(" ♩ = %1").arg(attributes["bpm"].toDouble());
             }
             else if (item->isMarker())
             {
                 kind = "marker";
-                text = TConv::translatedUserName(toMarker(item)->markerType()).toQString();
+                auto *mark = toMarker(item);
+                text = mark->plainText().toQString();
+                attributes["type"] = mark->isSegno()                          ? "segno"
+                                     : mark->isCoda()                         ? "coda"
+                                     : mark->isToCoda()                       ? "tocoda"
+                                     : mark->markerType() == MarkerType::FINE ? "fine"
+                                                                              : "";
+                attributes["label"] = mark->label().toQString();
             }
             else if (item->isJump())
             {
                 kind = "jump";
-                text = TConv::translatedUserName(toJump(item)->jumpType()).toQString();
+                auto *jump = toJump(item);
+                text = jump->plainText().toQString();
+                static const QMap<JumpType, QString> types{{JumpType::DC, "DC"},
+                                                           {JumpType::DS, "DS"},
+                                                           {JumpType::DC_AL_FINE, "DC_FINE"},
+                                                           {JumpType::DS_AL_FINE, "DS_FINE"},
+                                                           {JumpType::DC_AL_CODA, "DC_CODA"},
+                                                           {JumpType::DS_AL_CODA, "DS_CODA"}};
+                attributes = {{"type", types.value(jump->jumpType())},
+                              {"target", jump->jumpTo().toQString()},
+                              {"playUntil", jump->playUntil().toQString()},
+                              {"continueAt", jump->continueAt().toQString()}};
             }
             else if (item->isStaffText())
             {
                 kind = "text";
                 text = toStaffText(item)->plainText().toQString();
+            }
+            else if (item->isBreath())
+            {
+                kind = "breath";
+                text = QStringLiteral("，");
             }
             else if (item->isFermata())
             {
@@ -1586,6 +1645,8 @@ ScoreSnapshot ScoreDocument::snapshot() const
             {
                 kind = toKeySig(item)->keySigEvent().mode() == KeyMode::MINOR ? "minor-key" : "key";
                 text = QString::number(int(toKeySig(item)->keySigEvent().concertKey()));
+                attributes = {{"fifths", text.toInt()}, {"minor", kind == "minor-key"}};
+                kind = "key";
             }
             else if (item->isTimeSig() && !item->generated() && !toTimeSig(item)->isCourtesy() &&
                      item->tick().isNotZero())
@@ -1593,14 +1654,25 @@ ScoreSnapshot ScoreDocument::snapshot() const
                 kind = "time";
                 auto sig = toTimeSig(item)->sig();
                 text = QStringLiteral("%1/%2").arg(sig.numerator()).arg(sig.denominator());
+                attributes = {{"numerator", sig.numerator()}, {"denominator", sig.denominator()}};
             }
             if (kind.isEmpty())
+            {
+                if (item->isHarmony() || item->isRehearsalMark() ||
+                    QString::fromLatin1(item->typeName()).contains("Tremolo"))
+                    result.warnings << tr("内核保留但暂未显示：%1（位置 %2）")
+                                           .arg(QString::fromLatin1(item->typeName()))
+                                           .arg(item->tick().ticks());
                 return;
+            }
             auto id = idFor(item);
             if (!known.contains(id))
             {
                 known.insert(id);
                 result.marks.push_back({id, kind, text, int(item->track()), item->tick().ticks()});
+                result.marks.last().attributes = attributes;
+                result.marks.last().position = {item->tick().numerator(),
+                                                item->tick().denominator()};
             }
         });
     for (const auto &[tick, spanner] : score->spanner())
@@ -1609,6 +1681,7 @@ ScoreSnapshot ScoreDocument::snapshot() const
         if (spanner->isTie())
             continue;
         QString kind, text;
+        QJsonObject attributes;
         if (spanner->isSlur())
             kind = "slur";
         else if (spanner->isHairpin())
@@ -1619,11 +1692,29 @@ ScoreSnapshot ScoreDocument::snapshot() const
         else if (spanner->isVolta())
         {
             kind = "volta";
-            text = toVolta(spanner)->text().toQString();
+            auto *volta = toVolta(spanner);
+            text = volta->text().toQString();
+            QJsonArray endings;
+            for (int n : volta->endings())
+                endings << n;
+            attributes = {{"endings", endings},
+                          {"closed", volta->voltaType() == Volta::Type::CLOSED}};
+        }
+        else if (spanner->isPedal())
+        {
+            kind = "pedal";
+            text = "Ped.";
+        }
+        else if (spanner->isOttava())
+        {
+            auto *ottava = toOttava(spanner);
+            kind = "ottava";
+            text = QString::fromLatin1(Ottava::ottavaTypeName(ottava->ottavaType()));
+            attributes["octaves"] = ottava->pitchShift() / 12;
         }
         else
         {
-            result.warnings << tr("保留了暂不支持简谱显示的跨音符记号：%1")
+            result.warnings << tr("内核保留但暂未显示的跨音符记号：%1")
                                    .arg(QString::fromLatin1(spanner->typeName()));
             continue;
         }
@@ -1632,6 +1723,10 @@ ScoreSnapshot ScoreDocument::snapshot() const
              spanner->tick2().ticks(),
              spanner->startElement() ? idFor(spanner->startElement()) : QString(),
              spanner->endElement() ? idFor(spanner->endElement()) : QString()});
+        result.marks.last().attributes = attributes;
+        result.marks.last().position = {spanner->tick().numerator(), spanner->tick().denominator()};
+        result.marks.last().endPosition = {spanner->tick2().numerator(),
+                                           spanner->tick2().denominator()};
     }
     result.warnings.removeDuplicates();
     QMap<int, QMap<MusicalTime, EventData *>> eventsByPosition;

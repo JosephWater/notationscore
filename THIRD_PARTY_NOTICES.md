@@ -18,3 +18,5 @@ The independent module initializer and format adapter follow upstream production
 ## Editor fonts
 
 The application embeds Noto Serif CJK SC and Noto Sans CJK SC (SIL Open Font License 1.1, from https://github.com/notofonts/noto-cjk) and DejaVu Sans (Bitstream Vera / DejaVu font licenses). Corresponding license texts are distributed in `licenses/NotoCJK` and `licenses/DejaVu`. These fonts are used by the editor and do not change the MuseScore reference checkout.
+
+应用简谱记号显示额外嵌入固定 MuseScore 源码中的 Bravura.otf，遵循其 SIL Open Font License；字体许可随发行包的 licenses/fonts 一起提供。

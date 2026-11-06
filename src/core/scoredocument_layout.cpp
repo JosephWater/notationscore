@@ -170,6 +170,7 @@ bool ScoreDocument::syncSourceLayoutPass()
     m_input["autoBreakIds"] = automaticBreaks;
     m_input["automaticBarOffsets"] = automaticBars;
     m_input["source"] = aligned;
+    m_input["format"] = updated.version == "1.1" ? "fanqie-1.1" : "fanqie-1.0";
     m_input["bindings"] = bindings;
     m_input["overflow"] = updated.overflowJson();
     updateInputDiagnostics(updated);

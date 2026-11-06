@@ -61,3 +61,11 @@ CMake 将纯文字语法编为 `jianpu_notation`（Qt Core），排版与投影�
 ## 验证入口
 
 `tst_selection` 验证范围选择、批量片段、失败回滚和精确落点；`tst_lyrics` 验证谱面词位编辑、原生保护与图形变换；`tst_projection` 验证上述模块合作的用户行为；原有格式、工程、编辑和布局套件继续验证各自边界。界面行为使用真实文档和控件驱动，核心布局可直接用快照与固定字体验证几何。Linux 验证不能替代 Windows 字体、输入法和部署验收。
+
+## 图片识谱与记号扩展（0.6.0）
+
+`jianpu_ai` 依赖文档及 Qt Network；`AiClient` 只处理 HTTP/SSE，按字节缓存到完整 JSON 事件后解码，忽略 reasoning_content。`RecognitionTask` 负责有上限的识别、复核和修复，以及临时文档验证。API 配置独立保存在用户目录，不写进文档状态。
+
+`AiRecognitionUi` 负责设置、图片排序、独立窗口及进度；`InputController` 的外部文字会话暂停自动提交并暂存流式正文。完成后单次调用文档事务，失败时保存为可编辑草稿。关闭窗口中止网络请求，原窗口不参与识别事务。
+
+`TextMarks` 是 Qt Core 的记号注册、校验与 MusicXML 写入服务。M 时间使用 MusicalTime；快照保留记号的精确位置及结构化属性，跳房子不再只依靠文本推断编号或端点。原生工程仍是唯一音乐源，罕见记号继续保留保护。

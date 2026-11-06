@@ -10,6 +10,7 @@
 #include "engraving/infrastructure/mscwriter.h"
 #include "global/internal/baseapplication.h"
 #include "global/io/buffer.h"
+#include "input/textmarks.h"
 #include "layout/jianpulayout.h"
 #include "presentation/scoreprojection.h"
 #include "scoredocument.h"
@@ -323,6 +324,16 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
                     key += FanqieFormat::token(g) + QString::number(g.graceAfter);
                 result << key;
             }
+            for (const auto &mark : value.marks)
+                result << "mark:" +
+                              QString::fromUtf8(QJsonDocument(mark).toJson(QJsonDocument::Compact));
+            for (const auto &n : value.notes)
+                for (const auto &pitch : n.chord)
+                    result << QString("chord:%1:%2:%3:%4")
+                                  .arg(n.voice)
+                                  .arg(TextMarks::fraction(n.position))
+                                  .arg(pitch.midi)
+                                  .arg(pitch.accidental);
             return result;
         };
         const auto baseline = sourceText();
@@ -372,6 +383,137 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
     else
     {
         applyBindings(parsed, changes);
+        // Unedited M lines follow the same stable note identities as lyrics.
+        // Rebuild their coordinates after textual insertions/deletions, before staging.
+        auto oldParsed = FanqieFormat().parse(m_input["source"].toString());
+        bool moved = false;
+        const auto originalMarks = parsed.marks;
+        QSet<int> removedMarks;
+        for (int mi = 0; mi < parsed.marks.size(); ++mi)
+        {
+            auto &mark = parsed.marks[mi];
+            if (!oldParsed.marks.contains(mark))
+                continue;
+            for (const auto &key : {"start", "end"})
+            {
+                MusicalTime at;
+                if (!TextMarks::time(mark[key], at))
+                    continue;
+                const TextNote *anchor = nullptr;
+                bool tail = false;
+                for (const auto &n : oldParsed.notes)
+                    if (!mark["voice"].toInt() || n.voice == mark["voice"].toInt())
+                    {
+                        if (n.position == at)
+                        {
+                            anchor = &n;
+                            tail = false;
+                            break;
+                        }
+                        if (n.position + n.duration == at)
+                        {
+                            anchor = &n;
+                            tail = true;
+                        }
+                    }
+                if (!anchor)
+                    continue;
+                QString id;
+                for (auto b : m_input["bindings"].toArray())
+                    if (b.toObject()["offset"].toInt() == anchor->offset)
+                        id = b.toObject()["id"].toString();
+                bool found = false;
+                for (const auto &n : parsed.notes)
+                    if (n.id == id)
+                    {
+                        auto position = n.position + (tail ? n.duration : MusicalTime());
+                        moved |= position != at;
+                        mark[key] = TextMarks::fraction(position);
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                {
+                    if (QStringList{"fermata", "articulation", "breath"}.contains(
+                            mark["kind"].toString()))
+                    {
+                        removedMarks.insert(mi);
+                        moved = true;
+                        continue;
+                    }
+                    MusicalTime replacement;
+                    bool next = false;
+                    for (const auto &old : oldParsed.notes)
+                        if (old.voice == anchor->voice && old.position >= anchor->position)
+                        {
+                            QString oldId;
+                            for (auto b : m_input["bindings"].toArray())
+                                if (b.toObject()["offset"].toInt() == old.offset)
+                                    oldId = b.toObject()["id"].toString();
+                            for (const auto &n : parsed.notes)
+                                if (n.id == oldId && !next)
+                                {
+                                    replacement = n.position;
+                                    next = true;
+                                }
+                            if (next)
+                                break;
+                        }
+                    if (!next)
+                        for (const auto &n : parsed.notes)
+                            if (n.voice == anchor->voice)
+                                replacement = std::max(replacement, n.position + n.duration);
+                    mark[key] = TextMarks::fraction(replacement);
+                    moved = true;
+                }
+            }
+        }
+        for (int mi = 0; mi < parsed.marks.size(); ++mi)
+        {
+            MusicalTime a, b;
+            auto &mark = parsed.marks[mi];
+            if (oldParsed.marks.contains(originalMarks[mi]) && TextMarks::time(mark["start"], a) &&
+                TextMarks::time(mark["end"], b) && a >= b)
+            {
+                removedMarks.insert(mi);
+                moved = true;
+            }
+        }
+        if (moved)
+        {
+            for (int mi = parsed.marks.size() - 1; mi >= 0; --mi)
+                if (removedMarks.contains(mi))
+                    parsed.marks.removeAt(mi);
+            auto lines = parsed.source.split('\n');
+            int index = 0;
+            for (auto &line : lines)
+                if (QRegularExpression("^\\s*M\\s*[:：]").match(line).hasMatch())
+                {
+                    line = index < parsed.marks.size()
+                               ? "M: " + QString::fromUtf8(QJsonDocument(parsed.marks[index++])
+                                                               .toJson(QJsonDocument::Compact))
+                               : QString();
+                }
+            auto rebuilt = FanqieFormat().parse(lines.join('\n'));
+            for (auto &n : rebuilt.notes)
+                for (const auto &old : parsed.notes)
+                    if (n.voice == old.voice && n.position == old.position)
+                    {
+                        n.id = old.id;
+                        n.lyrics = old.lyrics;
+                        n.lyricSkips = old.lyricSkips;
+                        break;
+                    }
+            rebuilt.pendingLyrics = parsed.pendingLyrics;
+            rebuilt.overflow = parsed.overflow;
+            parsed = rebuilt;
+        }
+        for (const auto &mark : parsed.marks)
+        {
+            auto error = TextMarks::validate(mark, parsed);
+            if (!error.isEmpty())
+                return fail(error);
+        }
         auto xml = FanqieFormat().musicXml(parsed);
         if (xml.isEmpty())
             return fail(tr("时值过于复杂，无法在内核中精确表示；输入已保留，请调整连音比例。"));
@@ -435,8 +577,8 @@ bool ScoreDocument::applyText(const QString &source, const QString &mergeKey,
         if (b.automatic)
             automaticBars << b.offset;
     m_input["automaticBarOffsets"] = automaticBars;
-    m_input["format"] = "fanqie-1.0";
-    m_input["source"] = source;
+    m_input["format"] = parsed.version == "1.1" ? "fanqie-1.1" : "fanqie-1.0";
+    m_input["source"] = parsed.source;
     m_input["bindings"] = bindings;
     m_input["protected"] = protectedContent;
     if (!protectedContent)
@@ -496,8 +638,8 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
         messages << tr("此谱面操作包含文字稿不能完整表示的对象，已保护原始曲谱；可继续谱面编辑。");
         m_input["messages"] = messages;
     };
-    if (request.kind == K::AddChordNote || request.kind == K::Paste ||
-        request.kind == K::AddVoice || request.kind == K::AddPart ||
+    if ((request.kind == K::AddChordNote && !m_input.value("textOrigin").toBool()) ||
+        request.kind == K::Paste || request.kind == K::AddVoice || request.kind == K::AddPart ||
         request.kind == K::AppendMeasure || request.kind == K::DeleteMeasure)
     {
         protect();
@@ -509,6 +651,52 @@ void ScoreDocument::syncSourceAfterEdit(const EditRequest &request, const ScoreS
         return;
     auto source = m_input["source"].toString();
     auto parsed = parseText(source);
+    if ((parsed.version == "1.1" || request.kind == K::AddChordNote) &&
+        m_input.value("textOrigin").toBool() && request.kind != K::LyricsBatch)
+    {
+        auto after = snapshot();
+        if (request.kind == K::SetDegree || request.kind == K::InsertRest ||
+            request.kind == K::Delete)
+        {
+            auto pending = m_input["pendingLyrics"].toArray();
+            for (const auto &bar : before.measures)
+                for (const auto &old : bar.events)
+                {
+                    if (old.lyrics.isEmpty())
+                        continue;
+                    const EventData *current = nullptr;
+                    for (const auto &measure : after.measures)
+                        for (const auto &event : measure.events)
+                            if (event.track == old.track && !event.grace &&
+                                (event.id == old.id || event.position == old.position))
+                                current = &event;
+                    if (!current || current->rest)
+                        for (const auto &lyric : old.lyrics)
+                            if (!lyric.text.isEmpty())
+                                pending << lyric.text;
+                }
+            m_input["pendingLyrics"] = pending;
+        }
+        auto projected = FanqieFormat().fromSnapshot(after);
+        // Keep user headers and comments, replace only the musical projection and M lines.
+        auto clean = source.split('\n');
+        clean.removeIf([](const QString &l)
+                       { return QRegularExpression("^\\s*M\\s*[:：]").match(l).hasMatch(); });
+        auto rebuilt = FanqieFormat::replaceMusic(clean.join('\n'), projected);
+        if (!rebuilt.endsWith('\n'))
+            rebuilt += '\n';
+
+        rebuilt.replace(QRegularExpression("^V: 1\\.0", QRegularExpression::MultilineOption),
+                        "V: 1.1");
+        m_input["source"] = rebuilt;
+        m_input["format"] = "fanqie-1.1";
+        auto now = FanqieFormat().parse(rebuilt);
+        QJsonArray bindings;
+        for (auto n : now.notes)
+            bindings << binding(n, snapshot().voices.value(n.voice - 1).track);
+        m_input["bindings"] = bindings;
+        return;
+    }
     struct Replacement
     {
         int start, length;

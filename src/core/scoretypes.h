@@ -67,6 +67,7 @@ struct MeasureData
     int denominator = 4;
     bool repeatStart = false;
     bool repeatEnd = false;
+    int repeatCount = 2;
     QVector<EventData> events;
     int barline = 1;
 };
@@ -80,6 +81,8 @@ struct MarkData
     qint64 endTick = 0;
     QString startId;
     QString endId;
+    QJsonObject attributes;
+    MusicalTime position, endPosition;
 };
 struct ScoreSnapshot
 {

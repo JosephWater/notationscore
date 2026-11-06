@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "textformat.h"
+#include "textmarks.h"
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTextBoundaryFinder>
@@ -9,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <set>
 
 namespace jianpu
 {
@@ -28,9 +31,13 @@ QStringList TextParseResult::messages() const
 }
 bool TextParseResult::canProject() const
 {
-    return !fatal &&
-           std::none_of(diagnostics.begin(), diagnostics.end(), [](const auto &d)
-                        { return d.blocking && d.category == InputDiagnostic::Category::Syntax; });
+    return !fatal && std::none_of(diagnostics.begin(), diagnostics.end(),
+                                  [](const auto &d)
+                                  {
+                                      return d.blocking &&
+                                             (d.category == InputDiagnostic::Category::Syntax ||
+                                              d.category == InputDiagnostic::Category::Notation);
+                                  });
 }
 QJsonArray TextParseResult::overflowJson() const
 {
@@ -56,7 +63,7 @@ void TextParseResult::restoreOverflow(const QJsonArray &value)
 }
 std::unique_ptr<TextFormatAdapter> TextFormatAdapter::create(const QString &id)
 {
-    return id == "fanqie-1.0" ? std::make_unique<FanqieFormat>() : nullptr;
+    return (id == "fanqie-1.0" || id == "fanqie-1.1") ? std::make_unique<FanqieFormat>() : nullptr;
 }
 namespace
 {
@@ -275,10 +282,61 @@ struct Reader
                 ++p;
                 continue;
             }
-            if (c >= '0' && c <= '9')
+            if ((c >= '0' && c <= '9') || c == '{')
             {
                 TextNote n;
-                if (note(text, p, base, voice, n))
+                bool valid = false;
+                if (c == '{')
+                {
+                    int opening = p++;
+                    QVector<TextNote> pitches;
+                    while (p < text.size() && text[p] != '}')
+                    {
+                        if (text[p].isSpace())
+                        {
+                            ++p;
+                            continue;
+                        }
+                        if (text[p] < '1' || text[p] > '7')
+                        {
+                            diagnostic(r, base + p, QStringLiteral("和弦内需要 1–7 音高"));
+                            ++p;
+                            continue;
+                        }
+                        TextNote pitch;
+                        if (note(text, p, base, voice, pitch, true))
+                        {
+                            if (pitch.slashes || pitch.extensions || pitch.dots)
+                                diagnostic(r, pitch.offset, QStringLiteral("和弦时值请写在 } 后"));
+                            pitches << pitch;
+                        }
+                    }
+                    if (p == text.size())
+                        diagnostic(r, base + opening, QStringLiteral("和弦缺少 }"), true,
+                                   InputDiagnostic::Category::Incomplete);
+                    else
+                        ++p;
+                    if (!pitches.isEmpty())
+                    {
+                        int suffix = p;
+                        auto tail = QString("1") + text.mid(p);
+                        int cursor = 0;
+                        valid = note(tail, cursor, base + suffix - 1, voice, n);
+                        p += cursor - 1;
+                        n.degree = pitches[0].degree;
+                        n.octave = pitches[0].octave;
+                        n.accidental = pitches[0].accidental;
+                        n.chord = pitches.mid(1);
+                        n.offset = base + opening;
+                        n.length = p - opening;
+                        n.raw = text.mid(opening, n.length);
+                    }
+                    if (r.version != "1.1")
+                        diagnostic(r, base + opening, QStringLiteral("和弦需要 V: 1.1"));
+                }
+                else
+                    valid = note(text, p, base, voice, n);
+                if (valid)
                 {
                     int previous = lastForVoice(voice);
                     n.tieBack = previous >= 0 && r.notes[previous].tieForward;
@@ -524,8 +582,9 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
             }
             if (field == "V")
             {
-                if (value.trimmed() != "1.0")
-                    diagnostic(p.r, start, QStringLiteral("仅支持文字格式 V: 1.0"));
+                p.r.version = value.trimmed();
+                if (p.r.version != "1.0" && p.r.version != "1.1")
+                    diagnostic(p.r, start, QStringLiteral("支持文字格式 V: 1.0 / 1.1"));
             }
             else if (field == "B")
             {
@@ -565,6 +624,20 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
                 {
                     p.r.numerator = n;
                     p.r.denominator = d;
+                }
+            }
+            else if (field == "M")
+            {
+                QJsonParseError error;
+                auto doc = QJsonDocument::fromJson(value.toUtf8(), &error);
+                if (error.error != QJsonParseError::NoError || !doc.isObject())
+                    diagnostic(p.r, start, QStringLiteral("M 需要单行 JSON 对象"), true,
+                               InputDiagnostic::Category::Notation);
+                else
+                {
+                    auto mark = doc.object();
+                    mark["_offset"] = start;
+                    p.r.marks << mark;
                 }
             }
             else if (field == "Q")
@@ -691,6 +764,17 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
         int limit = 0;
         while (pos < end || p.r.measures.isEmpty())
         {
+            for (const auto &mark : p.r.marks)
+            {
+                MusicalTime at;
+                TextMarks::time(mark["start"], at);
+                if (mark["kind"] == "time" && at == pos)
+                {
+                    int n = mark["numerator"].toInt(), d = mark["denominator"].toInt();
+                    if (n > 0 && n <= 32 && d > 0 && d <= 32 && !(d & (d - 1)))
+                        nominal = {n, d};
+                }
+            }
             MusicalTime next = pos + nominal;
             for (const auto &b : primary)
                 if (b.position > pos && b.position < next)
@@ -728,10 +812,19 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
         QMap<int, int> previousMeasure;
         auto pitch = [&](TextNote &n, QMap<int, int> &state)
         {
-            int absolute = 4 * 7 + tonicStep(p.r.fifths) + std::max(0, n.degree - 1) + n.octave * 7;
+            int fifths = p.r.fifths;
+            for (const auto &mark : p.r.marks)
+            {
+                MusicalTime at;
+                TextMarks::time(mark["start"], at);
+                if (mark["kind"] == "key" && at <= n.position &&
+                    (!mark["voice"].toInt() || mark["voice"].toInt() == n.voice))
+                    fifths = std::clamp(mark["fifths"].toInt(), -7, 7);
+            }
+            int absolute = 4 * 7 + tonicStep(fifths) + std::max(0, n.degree - 1) + n.octave * 7;
             int octave = int(std::floor(absolute / 7.0));
             n.step = (absolute % 7 + 7) % 7;
-            int key = keyAlter(n.step, p.r.fifths);
+            int key = keyAlter(n.step, fifths);
             n.alter = n.accidental == 99  ? (habits.value("accidentalScope").toString() == "note"
                                                  ? key
                                                  : state.value(absolute, key))
@@ -753,7 +846,15 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
             previousMeasure[n.voice] = mi;
             pitch(n, accidentalState[n.voice]);
             for (auto &g : n.graces)
+            {
+                g.position = n.position;
                 pitch(g, accidentalState[n.voice]);
+            }
+            for (auto &g : n.chord)
+            {
+                g.position = n.position;
+                pitch(g, accidentalState[n.voice]);
+            }
         }
         QMap<int, const TextNote *> previous;
         for (const auto &n : p.r.notes)
@@ -769,6 +870,16 @@ TextParseResult FanqieFormat::parse(const QString &source, const QJsonObject &ha
             if (n->tieForward)
                 diagnostic(p.r, n->offset, QStringLiteral("延音连接 ^ 后还需要一个音符"), true,
                            InputDiagnostic::Category::Incomplete);
+        for (auto &mark : p.r.marks)
+        {
+            int offset = mark.take("_offset").toInt();
+            if (p.r.version != "1.1")
+                diagnostic(p.r, offset, QStringLiteral("M 记号需要 V: 1.1"), true,
+                           InputDiagnostic::Category::Notation);
+            auto error = TextMarks::validate(mark, p.r);
+            if (!error.isEmpty())
+                diagnostic(p.r, offset, error, true, InputDiagnostic::Category::Notation);
+        }
         return p.r;
     }
     catch (const std::overflow_error &)
@@ -806,6 +917,9 @@ QString typeName(int denominator)
 } // namespace
 QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
 {
+    if (std::any_of(r.diagnostics.begin(), r.diagnostics.end(), [](const auto &d)
+                    { return d.blocking && d.category == InputDiagnostic::Category::Notation; }))
+        return {};
     QByteArray bytes;
     QXmlStreamWriter w(&bytes);
     w.setAutoFormatting(true);
@@ -865,6 +979,15 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
         if (divisions > 100000000)
             return {};
     }
+    for (const auto &mark : r.marks)
+        for (const auto &key : {"start", "end"})
+        {
+            MusicalTime at;
+            if (TextMarks::time(mark[key], at))
+                divisions = std::lcm(divisions, (at * MusicalTime(4)).d);
+            if (divisions > 100000000)
+                return {};
+        }
     auto units = [&](MusicalTime t)
     {
         auto v = t * MusicalTime(4 * divisions);
@@ -874,6 +997,15 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
     {
         w.writeStartElement("part");
         w.writeAttribute("id", QString("P%1").arg(vi.key()));
+        std::set<MusicalTime> octavePositions;
+        auto writeOctaves = [&](MusicalTime at)
+        {
+            if (!octavePositions.contains(at))
+            {
+                octavePositions.insert(at);
+                TextMarks::octaves(w, r, vi.key(), at);
+            }
+        };
         for (int mi = 0; mi < r.measures.size(); ++mi)
         {
             const auto &measure = r.measures[mi];
@@ -900,13 +1032,17 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
                 w.writeEndElement();
                 w.writeEndElement();
             }
-            if (measure.repeatStart)
+            TextMarks::directions(w, r, vi.key(), measure.start, finish, divisions);
             {
                 w.writeStartElement("barline");
                 w.writeAttribute("location", "left");
-                w.writeStartElement("repeat");
-                w.writeAttribute("direction", "forward");
-                w.writeEndElement();
+                TextMarks::barline(w, r, vi.key(), measure.start, true);
+                if (measure.repeatStart)
+                {
+                    w.writeStartElement("repeat");
+                    w.writeAttribute("direction", "forward");
+                    w.writeEndElement();
+                }
                 w.writeEndElement();
             }
             QVector<Piece> pieces;
@@ -944,11 +1080,14 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
                     remaining = remaining - take;
                 }
             }
-            auto writeNote = [&](const TextNote &n, const Piece &piece, bool grace)
+            auto writeNote =
+                [&](const TextNote &n, const Piece &piece, bool grace, bool chord = false)
             {
                 w.writeStartElement("note");
                 if (n.degree == 8)
                     w.writeAttribute("print-object", "no");
+                if (chord)
+                    w.writeEmptyElement("chord");
                 if (grace)
                 {
                     w.writeStartElement("grace");
@@ -971,6 +1110,17 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
                     if (n.alter)
                         text("alter", QString::number(n.alter));
                     int natural = n.midi - n.alter;
+                    for (const auto &mark : r.marks)
+                        if (mark["kind"] == "ottava" &&
+                            (!mark["voice"].toInt() || mark["voice"].toInt() == vi.key()))
+                        {
+                            MusicalTime a, b;
+                            TextMarks::time(mark["start"], a);
+                            TextMarks::time(mark["end"], b);
+                            auto at = grace ? n.position : piece.start;
+                            if (at >= a && at < b)
+                                natural += 12 * mark["octaves"].toInt();
+                        }
                     text("octave", QString::number(natural / 12 - 1));
                     w.writeEndElement();
                 }
@@ -1016,7 +1166,9 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
                     w.writeAttribute("type", "start");
                     w.writeEndElement();
                 }
-                if (!grace)
+                if (!grace && !chord && !piece.before)
+                    TextMarks::notations(w, r, n.voice, n.position);
+                if (!grace && !chord)
                     for (int si = 0; si < r.spans.size(); ++si)
                     {
                         const auto &s = r.spans[si];
@@ -1035,7 +1187,7 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
                         }
                     }
                 w.writeEndElement();
-                if (!grace && !piece.before && !n.tieBack)
+                if (!grace && !chord && !piece.before && !n.tieBack)
                     for (auto it = n.lyrics.begin(); it != n.lyrics.end(); ++it)
                     {
                         w.writeStartElement("lyric");
@@ -1111,6 +1263,7 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
                 if (piece.start > used)
                     fillRest(piece.start - used, false);
                 const auto &n = r.notes[piece.index];
+                writeOctaves(piece.start);
                 if (!piece.before)
                 {
                     for (const auto &d : n.dynamics)
@@ -1133,6 +1286,14 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
                         }
                 }
                 writeNote(n, piece, false);
+                for (auto pitch : n.chord)
+                {
+                    pitch.tieForward = n.tieForward;
+                    pitch.tieBack = n.tieBack;
+                    pitch.tuplet = n.tuplet;
+                    pitch.normal = n.normal;
+                    writeNote(pitch, piece, false, true);
+                }
                 if (!piece.after)
                 {
                     for (const auto &g : n.graces)
@@ -1151,16 +1312,25 @@ QByteArray FanqieFormat::musicXml(const TextParseResult &r) const
                     }
                 }
                 used = piece.start + piece.length;
+                writeOctaves(used);
             }
             if (used < finish)
                 fillRest(finish - used, used == measure.start);
             {
                 w.writeStartElement("barline");
                 w.writeAttribute("location", "right");
+                TextMarks::barline(w, r, vi.key(), finish, false);
                 if (measure.repeatEnd)
                 {
                     w.writeStartElement("repeat");
                     w.writeAttribute("direction", "backward");
+                    for (const auto &mark : r.marks)
+                    {
+                        MusicalTime at;
+                        TextMarks::time(mark["start"], at);
+                        if (mark["kind"] == "repeat" && at == finish)
+                            w.writeAttribute("times", QString::number(mark["count"].toInt(2)));
+                    }
                     w.writeEndElement();
                 }
                 else
@@ -1180,11 +1350,27 @@ QStringList FanqieFormat::lyricTokens(const QString &text) { return syllables(te
 QString FanqieFormat::token(const TextNote &n)
 {
     QString t = QString::number(n.degree);
+    if (!n.chord.isEmpty())
+    {
+        auto root = n;
+        root.chord.clear();
+        root.slashes = root.extensions = root.dots = 0;
+        root.tieForward = false;
+        QStringList pitches{token(root)};
+        for (auto pitch : n.chord)
+        {
+            pitch.slashes = pitch.extensions = pitch.dots = 0;
+            pitch.tieForward = false;
+            pitches << token(pitch);
+        }
+        t = "{" + pitches.join(' ') + "}";
+    }
     t += QString(n.slashes, '/');
     t += QString(n.extensions, '-');
     t += QString(n.dots, '.');
-    t += QString(std::abs(n.octave), n.octave >= 0 ? '\'' : ',');
-    if (n.accidental != 99)
+    if (n.chord.isEmpty())
+        t += QString(std::abs(n.octave), n.octave >= 0 ? '\'' : ',');
+    if (n.chord.isEmpty() && n.accidental != 99)
         t += n.accidental > 0 ? '#' : n.accidental < 0 ? '$' : '=';
     if (n.tieForward)
         t += '^';
@@ -1196,7 +1382,8 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
     for (const auto &mark : s.marks)
         if (!QStringList{"dynamic", "text", "slur", "hairpin", "tuplet", "tie", "key", "minor-key",
                          "time"}
-                 .contains(mark.kind) ||
+                    .contains(mark.kind) &&
+                !TextMarks::encodable(mark) ||
             ((mark.kind == "key" || mark.kind == "minor-key" || mark.kind == "time") &&
              mark.tick != 0))
             protect = true;
@@ -1312,7 +1499,7 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
             for (const auto &e : m.events)
                 if (e.track == v.track)
                 {
-                    if (e.notes.size() > 1 || e.keyFifths != s.keyFifths)
+                    if (e.keyFifths != s.keyFifths)
                         protect = true;
                     if (e.grace)
                         continue;
@@ -1350,6 +1537,17 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
                         n.tieForward = note.tieStart;
                         n.tieBack = note.tieEnd;
                         spelling(note, e.keyFifths, n);
+                        for (int pi = 1; pi < e.notes.size(); ++pi)
+                        {
+                            auto pitch = e.notes[pi];
+                            TextNote member;
+                            int relative =
+                                pitch.octave * 7 + pitch.step - 28 - tonicStep(e.keyFifths);
+                            member.degree = (relative % 7 + 7) % 7 + 1;
+                            member.octave = int(std::floor(relative / 7.0));
+                            spelling(pitch, e.keyFifths, member);
+                            n.chord << member;
+                        }
                     }
                     if (e.denominator >= 4)
                         n.slashes = int(std::log2(e.denominator)) - 2;
@@ -1449,6 +1647,16 @@ QString FanqieFormat::fromSnapshot(const ScoreSnapshot &s, bool *protectedConten
         out += '\n';
         for (auto it = lyrics.begin(); it != lyrics.end(); ++it)
             out += QString("C%1: %2\n").arg(number).arg(it.value());
+    }
+    auto markLines = TextMarks::lines(s);
+    bool chords = false;
+    for (const auto &m : s.measures)
+        for (const auto &e : m.events)
+            chords |= e.notes.size() > 1;
+    if (!markLines.isEmpty() || chords)
+    {
+        out.replace(0, 6, "V: 1.1");
+        out += markLines;
     }
     if (protectedContent)
         *protectedContent = protect;

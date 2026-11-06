@@ -38,7 +38,7 @@ try {
     Get-ChildItem "$buildDir/_deps" -Recurse -Filter '*.dll' | ForEach-Object {
         Copy-Item $_.FullName $buildDir -Force
     }
-    foreach ($program in @('jianpu_lab', 'jianpu_engine_probe', 'tst_document', 'tst_textinput', 'tst_projection', 'tst_lyrics', 'tst_selection', 'tst_editor', 'tst_scorewidget', 'tst_qtruntime')) {
+    foreach ($program in @('jianpu_lab', 'jianpu_engine_probe', 'jianpu_ai_probe', 'tst_document', 'tst_notation', 'tst_ai', 'tst_textinput', 'tst_projection', 'tst_lyrics', 'tst_selection', 'tst_editor', 'tst_scorewidget', 'tst_qtruntime')) {
         Invoke-Checked "$env:QT_ROOT/bin/windeployqt.exe" @("--$($Configuration.ToLowerInvariant())", '--compiler-runtime', '--no-translations', '--include-plugins', 'qoffscreen', "$buildDir/$program.exe")
     }
     Invoke-Checked 'ctest' @('--preset', $preset)

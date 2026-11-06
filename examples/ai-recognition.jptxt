@@ -1,0 +1,19 @@
+V: 1.1
+B: 识谱与记号测试
+Z: 简谱实验室 示例
+D: C
+P: 4/4
+Q1: |: {1 3 5} 2 3 4 | 5 6 7 1' :| 1 2 3 4 | 5 4 3 2 | 1--- ||
+C1: 春夏秋冬山水天地日月星辰清风白云家
+C1: 一二三四五六七八九十一二三四五六七
+M: {"kind":"volta","voice":1,"start":"0/1","end":"2/1","endings":[1,3],"closed":false}
+M: {"kind":"volta","voice":1,"start":"2/1","end":"4/1","endings":[2],"closed":true}
+M: {"kind":"repeat","voice":0,"start":"2/1","count":3}
+M: {"kind":"tempo","voice":0,"start":"0/1","bpm":96,"text":"稍快"}
+M: {"kind":"articulation","voice":1,"start":"0/1","type":"staccato"}
+M: {"kind":"fermata","voice":1,"start":"4/1"}
+M: {"kind":"marker","voice":1,"start":"0/1","type":"segno"}
+M: {"kind":"marker","voice":1,"start":"4/1","type":"fine"}
+M: {"kind":"jump","voice":1,"start":"17/4","type":"DS_FINE"}
+M: {"kind":"pedal","voice":1,"start":"0/1","end":"1/1"}
+M: {"kind":"breath","voice":1,"start":"3/4"}

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "mainwindow.h"
+#include "airecognition.h"
 #include "input/inputcontroller.h"
 #include "layout/visualelement.h"
 #include "layoutpanel.h"
@@ -149,6 +150,10 @@ void MainWindow::buildMenus()
                 openPath(path);
         },
         QKeySequence::Open);
+    file->addAction(tr("AI 图片识谱…"), this, [this] { AiRecognitionUi::chooseImages(this); })
+        ->setObjectName("aiRecognize");
+    file->addAction(tr("AI 接口设置…"), this, [this] { AiRecognitionUi::settings(this); })
+        ->setObjectName("aiSettings");
     auto *saveAction = file->addAction(tr("保存"), this, [this] { save(); }, QKeySequence::Save);
     file->addAction(tr("另存为…"), this, [this] { save(true); }, QKeySequence::SaveAs);
     auto *exportMenu = file->addMenu(tr("导出"));
@@ -576,7 +581,7 @@ void MainWindow::refresh()
     m_pendingLyrics->setText(pending.isEmpty() ? tr("无") : pending.join(" "));
     auto reports =
         m_canvas->score().warnings + m_document.inputMessages() + m_canvas->layoutResult().warnings;
-    m_report->setPlainText(reports.isEmpty() ? tr("曲谱已载入，未发现导入警告。")
+    m_report->setPlainText(reports.isEmpty() ? tr("曲谱已载入，常用记号已显示，未发现导入警告。")
                                              : reports.join('\n'));
     statusBar()->showMessage(tr("%1 小节 · %2 声部 · %3 音符")
                                  .arg(m_canvas->score().measures.size())
@@ -860,6 +865,7 @@ void MainWindow::exportFormat(const QString &extension)
 }
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    emit closingRequested();
     if (!m_confirmClose || confirmDiscard())
         event->accept();
     else

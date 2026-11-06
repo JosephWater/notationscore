@@ -12,7 +12,21 @@ QString FanqieFormat::replaceMusic(const QString &source, const QString &project
 {
     if (source.isEmpty())
         return projection;
-    static const QRegularExpression musicalField("^\\s*[QC]\\d*\\s*[:：]");
+    auto upgrade = [&](QString output)
+    {
+        if (projection.contains("V: 1.1"))
+        {
+            auto header =
+                QRegularExpression("^[ \\t]*V[ \\t]*[:：].*$", QRegularExpression::MultilineOption)
+                    .match(output);
+            if (header.hasMatch())
+                output.replace(header.capturedStart(), header.capturedLength(), "V: 1.1");
+            else
+                output.prepend("V: 1.1\n");
+        }
+        return output;
+    };
+    static const QRegularExpression musicalField("^\\s*(?:[QC]\\d*|M)\\s*[:：]");
     QStringList music, result;
     for (const auto &line : projection.split('\n'))
         if (musicalField.match(line).hasMatch())
@@ -23,7 +37,7 @@ QString FanqieFormat::replaceMusic(const QString &source, const QString &project
         if (musicalField.match(lines[i]).hasMatch())
             last = i;
     if (last < 0)
-        return source + (source.endsWith('\n') ? "" : "\n") + music.join('\n') + "\n";
+        return upgrade(source + (source.endsWith('\n') ? "" : "\n") + music.join('\n') + "\n");
     for (int i = 0; i < lines.size(); ++i)
     {
         if (musicalField.match(lines[i]).hasMatch())
@@ -37,7 +51,7 @@ QString FanqieFormat::replaceMusic(const QString &source, const QString &project
         else
             result << lines[i];
     }
-    return result.join('\n');
+    return upgrade(result.join('\n'));
 }
 namespace
 {
@@ -173,7 +187,7 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
     for (const auto &b : p.boundaries)
         if (!b.automatic)
             explicitEnds[b.voice].insert(b.position);
-    QStringList headers;
+    QStringList headers, markLines;
     bool changed = p.rewriteLyrics || std::any_of(p.boundaries.begin(), p.boundaries.end(),
                                                   [](const auto &b) { return b.automatic; });
     auto append = [](QString &music, const QString &part)
@@ -203,7 +217,10 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
         auto field = QRegularExpression("^\\s*([QC])(\\d*)\\s*[:：]\\s*(.*)$").match(line);
         if (!field.hasMatch())
         {
-            headers << line;
+            if (QRegularExpression("^\\s*M\\s*[:：]").match(line).hasMatch())
+                markLines << line;
+            else
+                headers << line;
             offset += line.size() + 1;
             continue;
         }
@@ -342,6 +359,7 @@ QString FanqieFormat::alignedSource(const TextParseResult &p,
             output << "C" + lyricSuffix + ": " + words.join(" ");
         }
     }
+    output += markLines;
     return output.join('\n') + (p.source.endsWith('\n') ? "\n" : "");
 }
 } // namespace jianpu

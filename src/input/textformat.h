@@ -22,6 +22,7 @@ struct InputDiagnostic
     enum class Category
     {
         Syntax,
+        Notation,
         Incomplete,
         LyricsOverflow,
         UnassignedLyrics
@@ -40,6 +41,7 @@ struct TextNote
     MusicalTime duration{1, 4}, written{1, 4}, position;
     int tuplet = 0, normal = 0, tupletId = -1;
     QVector<TextNote> graces;
+    QVector<TextNote> chord;
     bool graceAfter = false, sourceBreak = false, tieForward = false, tieBack = false;
     QStringList dynamics;
     QString annotation;
@@ -73,6 +75,7 @@ struct TextParseResult
         QStringList words;
     };
     QString source, title = QStringLiteral("未命名曲谱");
+    QString version = "1.0";
     QStringList subtitles, authors;
     int fifths = 0, numerator = 4, denominator = 4;
     bool minor = false;
@@ -82,6 +85,7 @@ struct TextParseResult
     QVector<TextSpan> spans;
     QVector<TextBoundary> boundaries;
     QVector<TextMeasure> measures;
+    QVector<QJsonObject> marks;
     QVector<InputDiagnostic> diagnostics;
     QMap<int, QString> voiceNames;
     QMap<int, int> verseRows;

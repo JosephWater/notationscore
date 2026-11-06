@@ -310,7 +310,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                 {
                     keyTick = mark.tick;
                     fifths = mark.text.toInt();
-                    minor = mark.kind == "minor-key";
+                    minor = mark.kind == "minor-key" || mark.attributes["minor"].toBool();
                 }
             }
         text("@key:" + QString::number(page), keyLabel(fifths, minor),
@@ -537,7 +537,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                      ? begin == 0
                      : writtenEnds[v.track] > MusicalTime(score.measures[begin].tick, 1920)))
                 rowVoices << v;
-        QMap<int, qreal> lyricShift;
+        QMap<int, qreal> lyricShift, aboveShift;
         auto localHeights = rowHeights;
         qreal localHeight = style.preset == "classic" ? 24 : 36;
         for (const auto &v : rowVoices)
@@ -546,6 +546,25 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             qreal extra = MarkPlacement::belowReserve(
                 score.marks, v.track, score.measures[begin].tick,
                 score.measures[end - 1].tick + score.measures[end - 1].duration);
+            QMap<qint64, int> stacks;
+            bool upperSpan = false;
+            for (const auto &mark : score.marks)
+                if (mark.track == v.track &&
+                    mark.tick < score.measures[end - 1].tick + score.measures[end - 1].duration &&
+                    (mark.endTick > score.measures[begin].tick ||
+                     mark.tick >= score.measures[begin].tick))
+                {
+                    upperSpan |= mark.kind == "volta" || mark.kind == "ottava";
+                    if (mark.endTick <= mark.tick && mark.kind != "dynamic")
+                        ++stacks[mark.tick];
+                }
+            int stack = 1;
+            for (auto n : stacks)
+                stack = std::max(stack, n);
+            auto upper = (stack - 1) * 24 + (upperSpan ? 34 : 0);
+            aboveShift[v.track] = upper;
+            localHeights[v.track] += upper;
+            localHeight += upper;
             lyricShift[v.track] = extra;
             localHeights[v.track] += extra;
             localHeight += extra;
@@ -569,11 +588,12 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
         qreal rowY = y + 28;
         for (const auto &v : rowVoices)
         {
+            rowY += aboveShift.value(v.track);
             system.rowTop[v.track] = rowY;
             if (style.showVoices && voices.size() > 1)
                 text("@voice:" + QString::number(systems.size()) + ":" + QString::number(v.track),
                      v.name, QRectF(system.right - 200, rowY - 48, 200, 18), 11, v.track);
-            rowY += localHeights[v.track];
+            rowY += localHeights[v.track] - aboveShift.value(v.track);
         }
         qreal measureX = system.left;
         const int systemIndex = systems.size();
@@ -649,6 +669,9 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                          QPointF(measureX + width - 4, bottom), v.track);
                     dot(m.id, QPointF(measureX + width - 10, middle - 5), v.track);
                     dot(m.id, QPointF(measureX + width - 10, middle + 5), v.track);
+                    if (m.repeatCount != 2)
+                        text(m.id, QString("×%1").arg(m.repeatCount),
+                             QRectF(measureX + width - 42, top - 23, 38, 20), 11, v.track);
                 }
             }
             for (const auto &e : m.events)
@@ -903,6 +926,7 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             paintGroup();
         }
     out.hits += headerHits;
+    QMap<int, QVector<QRectF>> occupiedMarks;
     for (const auto &mark : score.marks)
     {
         if (headerMarks.contains(mark.id))
@@ -918,7 +942,8 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
             auto end = lastMeasure.tick + lastMeasure.duration;
             if (mark.tick >= start && mark.tick < end)
                 firstSystem = si;
-            if (((mark.kind == "tuplet" || mark.kind == "volta" || mark.kind == "hairpin")
+            if (((mark.kind == "tuplet" || mark.kind == "volta" || mark.kind == "hairpin" ||
+                  mark.kind == "pedal" || mark.kind == "ottava")
                      ? mark.endTick > start
                      : mark.endTick >= start) &&
                 mark.endTick <= end)
@@ -948,7 +973,8 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
         };
         if (mark.endTick > mark.tick &&
             (mark.kind == "slur" || mark.kind == "tie" || mark.kind == "hairpin" ||
-             mark.kind == "volta" || mark.kind == "tuplet"))
+             mark.kind == "volta" || mark.kind == "tuplet" || mark.kind == "pedal" ||
+             mark.kind == "ottava"))
         {
             lastSystem = std::max(firstSystem, lastSystem);
             for (int si = firstSystem; si <= lastSystem; ++si)
@@ -959,13 +985,13 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                 qreal row = sys.rowTop[mark.track];
                 qreal a = si == firstSystem ? pointAt(sys, mark.tick) : sys.left + 5;
                 qreal b = si == lastSystem ? pointAt(sys, mark.endTick) : sys.right - 5;
-                if (si == firstSystem && positions.contains(mark.startId) &&
+                if (mark.kind != "volta" && si == firstSystem && positions.contains(mark.startId) &&
                     positions[mark.startId].system == si)
                     a = positions[mark.startId].p.x();
-                if (si == lastSystem && positions.contains(mark.endId) &&
+                if (mark.kind != "volta" && si == lastSystem && positions.contains(mark.endId) &&
                     positions[mark.endId].system == si)
                     b = positions[mark.endId].p.x();
-                qreal cy = row - (mark.kind == "volta" ? 20 : 5);
+                qreal cy = row - (mark.kind == "volta" ? 48 : 5);
                 if (mark.kind == "tie" && positions.contains(mark.startId) &&
                     positions[mark.startId].system == si)
                     cy = positions[mark.startId].p.y() - 5;
@@ -988,12 +1014,35 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                     path.moveTo(a, cy + (close ? 5 : 0));
                     path.lineTo(b, cy + (close ? 0 : 5));
                 }
+                else if (mark.kind == "pedal" || mark.kind == "ottava")
+                {
+                    if (mark.kind == "pedal")
+                        cy = row + maxChord[mark.track] * noteSpacing[mark.track] + 28;
+                    else
+                        cy = row - 44;
+                    path.moveTo(a, cy);
+                    path.lineTo(b, cy);
+                    if (si == lastSystem)
+                    {
+                        path.moveTo(b, cy);
+                        path.lineTo(b, cy + (mark.kind == "pedal" ? -8 : 8));
+                    }
+                    text(mark.id, si == firstSystem ? mark.text : "", QRectF(a, cy - 20, 65, 18),
+                         12, mark.track);
+                }
                 else if (mark.kind == "volta" || mark.kind == "tuplet")
                 {
-                    path.moveTo(a, cy + 9);
-                    path.lineTo(a, cy);
+                    if (si == firstSystem)
+                    {
+                        path.moveTo(a, cy + 9);
+                        path.lineTo(a, cy);
+                    }
+                    else
+                        path.moveTo(a, cy);
                     path.lineTo(b, cy);
-                    path.lineTo(b, cy + 9);
+                    if (mark.kind == "tuplet" ||
+                        (si == lastSystem && mark.attributes.value("closed").toBool(true)))
+                        path.lineTo(b, cy + 9);
                     text(mark.id, mark.text,
                          QRectF(mark.kind == "tuplet" ? (a + b) / 2 - 15 : a + 4, cy + 2,
                                 mark.kind == "tuplet" ? 30 : 65, 16),
@@ -1030,11 +1079,44 @@ LayoutResult JianpuLayout::layout(const ScoreSnapshot &inputScore,
                                              sys.rowTop[mark.track] +
                                                  maxChord[mark.track] * noteSpacing[mark.track]);
             QString label = (mark.kind == "key" || mark.kind == "minor-key")
-                                ? keyLabel(mark.text.toInt(), mark.kind == "minor-key")
+                                ? keyLabel(mark.text.toInt(), mark.kind == "minor-key" ||
+                                                                  mark.attributes["minor"].toBool())
                                 : mark.text;
-            qreal labelWidth = textWidth(label, 13) + 8;
+            QString musicGlyph;
+            if (mark.kind == "fermata")
+                musicGlyph = QString(QChar(0xe4c0));
+            if (mark.kind == "marker" && mark.attributes["type"] == "segno")
+                musicGlyph = QString(QChar(0xe047));
+            if (mark.kind == "marker" && mark.attributes["type"] == "coda")
+                musicGlyph = QString(QChar(0xe048));
+            if (mark.kind == "breath")
+                musicGlyph = QString(QChar(0xe4ce));
+            static const QMap<QString, ushort> articulationGlyphs{
+                {"staccato", 0xE4A2},      {"tenuto", 0xE4A4},
+                {"accent", 0xE4A0},        {"strong-accent", 0xE4AC},
+                {"staccatissimo", 0xE4A6}, {"trill-mark", 0xE566},
+                {"turn", 0xE567},          {"inverted-turn", 0xE568},
+                {"mordent", 0xE56C},       {"inverted-mordent", 0xE56D}};
+            if (mark.kind == "articulation" &&
+                articulationGlyphs.contains(mark.attributes["type"].toString()))
+                musicGlyph = QString(QChar(articulationGlyphs[mark.attributes["type"].toString()]));
+            if (!musicGlyph.isEmpty())
+                label = musicGlyph;
+            qreal labelWidth = musicGlyph.isEmpty() ? textWidth(label, 13) + 8 : 30;
             QRectF box(x - labelWidth / 2, my, labelWidth, 24);
-            text(mark.id, label, box, 13, mark.track);
+            for (int tries = 0; tries < 24; ++tries)
+            {
+                bool collision = false;
+                for (const auto &old : occupiedMarks[mark.track])
+                    collision |= old.intersects(box.adjusted(-2, -2, 2, 2));
+                if (!collision)
+                    break;
+                box.translate(0, -24);
+            }
+            occupiedMarks[mark.track] << box;
+            text(mark.id, label, box, musicGlyph.isEmpty() ? 13 : 24, mark.track);
+            if (!musicGlyph.isEmpty())
+                out.items.last().fontFamily = "Bravura";
             out.hits.push_back({mark.id, {}, box, mark.track, sys.first, mark.tick, false});
         }
     }

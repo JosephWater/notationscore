@@ -562,7 +562,8 @@ class TextInputTest : public QObject
             }
         auto id = s.measures[0].events[0].notes[0].id;
         QVERIFY(d.edit({EditRequest::Kind::AddChordNote, {id}, 67}));
-        QVERIFY(d.inputState()["protected"].toBool());
+        QVERIFY(!d.inputState()["protected"].toBool());
+        QVERIFY(d.sourceText().contains("V: 1.1"));
         QCOMPARE(d.sourceText().count("Q1:"), 2);
         QCOMPARE(d.sourceText().count("Q2:"), 2);
         QVERIFY(d.sourceText().contains(QStringLiteral("春")));
@@ -1038,7 +1039,7 @@ class TextInputTest : public QObject
         ScoreDocument imported;
         QVERIFY(imported.open(xml));
         auto before = imported.snapshot().noteCount();
-        // Add an unsupported chord, then ensure source editing cannot silently discard it.
+        // Native instrument definitions remain protected even when chord text is representable.
         QString id;
         for (auto m : imported.snapshot().measures)
             for (auto e : m.events)
@@ -1046,7 +1047,12 @@ class TextInputTest : public QObject
                     id = e.notes[0].id;
         QVERIFY(imported.edit({EditRequest::Kind::AddChordNote, {id}, 67}));
         auto text = imported.sourceText();
-        text.replace("1/", "3/");
+        auto parsed = FanqieFormat().parse(text);
+        QVERIFY(!parsed.notes.isEmpty());
+        int position = parsed.notes.first().offset;
+        if (text[position] == '{')
+            ++position;
+        text.replace(position, 1, "3");
         QVERIFY(!imported.applyText(text));
         QCOMPARE(imported.snapshot().noteCount(), before + 1);
     }
